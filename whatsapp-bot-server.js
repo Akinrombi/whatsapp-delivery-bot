@@ -32,7 +32,9 @@ const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
-
+app.get('/privacy', (req, res) => {
+  res.send('Privacy Policy: We collect your WhatsApp number and order details solely to process your food, grocery, package, or ride orders. We do not sell or share your data with third parties. Contact us at your business email for any questions.');
+});
 const {
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_ID,
