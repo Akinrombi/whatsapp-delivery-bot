@@ -1,40 +1,10 @@
-/**
- * WhatsApp customer-ordering bot — Node.js / Express
- * Uses Meta's WhatsApp Cloud API (free tier works for this).
- *
- * WHAT THIS DOES
- * Customers message your WhatsApp Business number. This webhook:
- *   1. Verifies the webhook with Meta (GET)
- *   2. Receives incoming messages (POST)
- *   3. Walks the customer through a simple state machine:
- *        pick service -> browse/select -> confirm -> payment link -> order created
- *   4. On order creation, POSTs the finished order to YOUR backend,
- *      which is what feeds the vendor/rider dashboard.
- *
- * SETUP
- *   npm init -y
- *   npm install express dotenv node-fetch@2
- *   Create a .env file with:
- *     WHATSAPP_TOKEN=your_meta_access_token
- *     WHATSAPP_PHONE_ID=your_phone_number_id
- *     VERIFY_TOKEN=any_string_you_choose
- *     ORDERS_API_URL=https://your-backend.example.com/api/orders
- *   node server.js
- *
- * In Meta's App Dashboard (WhatsApp > Configuration), set the webhook
- * callback URL to https://your-domain.com/webhook and the verify token
- * to match VERIFY_TOKEN above.
- */
-
 require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
-app.get('/privacy', (req, res) => {
-  res.send('Privacy Policy: We collect your WhatsApp number and order details solely to process your food, grocery, package, or ride orders. We do not sell or share your data with third parties. Contact us at your business email for any questions.');
-});
+
 const {
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_ID,
@@ -42,10 +12,10 @@ const {
   ORDERS_API_URL
 } = process.env;
 
-const GRAPH_URL = `https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_ID}/messages`;
+const GRAPH_URL = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
 
-// ---- In-memory conversation state (swap for Redis/DB in production) ----
-const sessions = new Map(); // key: customer phone number, value: session object
+// ---- In-memory conversation state ----
+const sessions = new Map();
 
 function getSession(phone) {
   if (!sessions.has(phone)) {
@@ -53,97 +23,103 @@ function getSession(phone) {
   }
   return sessions.get(phone);
 }
+
 function resetSession(phone) {
   sessions.set(phone, { step: 'menu', service: null, cart: [], address: null });
 }
 
-// ---- Fake catalog — replace with real vendor data from your DB ----
+// ---- Package Catalog ----
 const CATALOGS = {
-  food: [
-    { id: 'f1', name: 'Jollof rice + chicken', price: 3500 },
-    { id: 'f2', name: 'Suya wrap', price: 2000 },
-    { id: 'f3', name: 'Pounded yam + egusi', price: 4000 }
-  ],
-  grocery: [
-    { id: 'g1', name: 'Weekly grocery bundle', price: 15000 },
-    { id: 'g2', name: 'Rice + beans (5kg each)', price: 8000 }
-  ],
   package: [
-    { id: 'p1', name: 'Standard parcel (send/receive)', price: 1500 }
-  ],
-  ride: [
-    { id: 'r1', name: 'Standard ride', price: 0 } // priced by distance at confirm step
+    { id: 'p1', name: 'Standard Local Express (0–3 km)', price: 700 },
+    { id: 'p2', name: 'Extended Local Express (3–5 km)', price: 1200 }
   ]
 };
 
-// ---- WhatsApp message senders ----
+// ---- WhatsApp Message Senders ----
 async function sendText(to, body) {
-  await fetch(GRAPH_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body }
-    })
-  });
+  try {
+    const res = await fetch(GRAPH_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body }
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) console.error('Error sending text:', data);
+  } catch (err) {
+    console.error('Network error in sendText:', err);
+  }
 }
 
 async function sendButtons(to, bodyText, buttons) {
-  // buttons: [{ id: 'food', title: 'Food' }, ...]  max 3 per WhatsApp limits
-  await fetch(GRAPH_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        body: { text: bodyText },
-        action: {
-          buttons: buttons.map(b => ({
-            type: 'reply',
-            reply: { id: b.id, title: b.title }
-          }))
+  try {
+    const res = await fetch(GRAPH_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: bodyText },
+          action: {
+            buttons: buttons.map(b => ({
+              type: 'reply',
+              reply: { id: b.id, title: b.title }
+            }))
+          }
         }
-      }
-    })
-  });
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) console.error('Error sending buttons:', data);
+  } catch (err) {
+    console.error('Network error in sendButtons:', err);
+  }
 }
 
 async function sendList(to, bodyText, sectionTitle, rows) {
-  // rows: [{ id, title, description }]
-  await fetch(GRAPH_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'list',
-        body: { text: bodyText },
-        action: {
-          button: 'View options',
-          sections: [{ title: sectionTitle, rows }]
+  try {
+    const res = await fetch(GRAPH_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text: bodyText },
+          action: {
+            button: 'View Options',
+            sections: [{ title: sectionTitle, rows }]
+          }
         }
-      }
-    })
-  });
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) console.error('Error sending list:', data);
+  } catch (err) {
+    console.error('Network error in sendList:', err);
+  }
 }
 
-// ---- Order creation: hands the finished order to your main backend ----
+// ---- Order Handler ----
 async function createOrder(phone, session) {
   const order = {
     id: 'ORD-' + Date.now(),
@@ -154,42 +130,48 @@ async function createOrder(phone, session) {
     source: 'whatsapp'
   };
 
-  try {
-    await fetch(ORDERS_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(order)
-    });
-  } catch (err) {
-    console.error('Failed to push order to backend:', err.message);
+  console.log('NEW ORDER CREATED:', order);
+
+  // Safely attempt backend POST only if a real URL is provided
+  if (ORDERS_API_URL && !ORDERS_API_URL.includes('example.com')) {
+    try {
+      await fetch(ORDERS_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(order)
+      });
+    } catch (err) {
+      console.error('Failed to push order to external backend:', err.message);
+    }
   }
 
   return order;
 }
 
-// ---- Webhook verification (Meta calls this once when you set up the webhook) ----
+// ---- Webhook Verification (GET) ----
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('Webhook verified successfully!');
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
   }
 });
 
-// ---- Incoming message handler ----
+// ---- Incoming Messages (POST) ----
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // acknowledge immediately, Meta requires a fast response
+  res.sendStatus(200); // Always respond 200 OK immediately to Meta
 
   const entry = req.body.entry?.[0];
   const change = entry?.changes?.[0];
   const message = change?.value?.messages?.[0];
   if (!message) return;
 
-  const from = message.from; // customer's WhatsApp number
+  const from = message.from;
   const session = getSession(from);
 
   const text = message.text?.body?.trim().toLowerCase();
@@ -199,15 +181,15 @@ app.post('/webhook', async (req, res) => {
   try {
     await handleMessage(from, session, input);
   } catch (err) {
-    console.error(err);
-    await sendText(from, "Something went wrong on our end — let's start again.");
+    console.error('Error handling message:', err);
+    await sendText(from, "Something went wrong — let's restart.");
     resetSession(from);
   }
 });
 
-// ---- Conversation state machine ----
+// ---- State Machine Logic ----
 async function handleMessage(from, session, input) {
-  if (input === 'restart' || input === 'menu') {
+  if (input === 'restart' || input === 'menu' || input === 'hi' || input === 'hello') {
     resetSession(from);
     return showServiceMenu(from);
   }
@@ -218,25 +200,25 @@ async function handleMessage(from, session, input) {
 
     case 'awaiting_service': {
       if (!CATALOGS[input]) {
-        return sendText(from, "Please pick one of the options above.");
+        return sendText(from, "Please tap one of the option buttons above.");
       }
       session.service = input;
       session.step = 'awaiting_item';
       const rows = CATALOGS[input].map(item => ({
         id: item.id,
         title: item.name,
-        description: item.price ? `₦${item.price.toLocaleString()}` : 'Priced after pickup details'
+        description: `₦${item.price.toLocaleString()}`
       }));
-      return sendList(from, `What would you like from ${input}?`, 'Available', rows);
+      return sendList(from, "Select your parcel size/distance:", "Delivery Options", rows);
     }
 
     case 'awaiting_item': {
       const catalog = CATALOGS[session.service];
       const item = catalog.find(i => i.id === input);
-      if (!item) return sendText(from, "Please choose an item from the list.");
+      if (!item) return sendText(from, "Please select a valid option from the menu list.");
       session.cart.push(item);
       session.step = 'awaiting_address';
-      return sendText(from, `Added *${item.name}*. What's the delivery address (or pickup location for a ride)?`);
+      return sendText(from, `Selected: *${item.name}*.\n\nPlease reply with your Pickup Location and Drop-off Address:`);
     }
 
     case 'awaiting_address': {
@@ -246,8 +228,8 @@ async function handleMessage(from, session, input) {
       const total = session.cart.reduce((sum, i) => sum + (i.price || 0), 0);
       return sendButtons(
         from,
-        `Confirm order:\n${itemNames}\nDeliver to: ${session.address}\nTotal: ₦${total.toLocaleString()}`,
-        [{ id: 'confirm_yes', title: 'Confirm' }, { id: 'confirm_no', title: 'Cancel' }]
+        `Confirm your delivery booking:\n• Service: ${itemNames}\n• Locations: ${session.address}\n• Total: ₦${total.toLocaleString()}`,
+        [{ id: 'confirm_yes', title: 'Confirm Order' }, { id: 'confirm_no', title: 'Cancel' }]
       );
     }
 
@@ -256,12 +238,11 @@ async function handleMessage(from, session, input) {
         const order = await createOrder(from, session);
         await sendText(
           from,
-          `Order placed! Reference: ${order.id}\nA vendor/rider will confirm shortly. We'll message you a payment link next.`
+          `✅ Order Placed!\nRef Code: ${order.id}\n\nOur bicycle dispatch rider will contact you in a moment for pickup.`
         );
-        // TODO: integrate Paystack/Flutterwave here and send the real payment link
         resetSession(from);
       } else {
-        await sendText(from, "Order cancelled.");
+        await sendText(from, "Order cancelled. Send 'Hi' whenever you are ready to book again!");
         resetSession(from);
       }
       return;
@@ -276,13 +257,10 @@ async function handleMessage(from, session, input) {
 async function showServiceMenu(from) {
   const session = getSession(from);
   session.step = 'awaiting_service';
-  return sendButtons(from, "What would you like to do today?", [
-    { id: 'food', title: 'Order food' },
-    { id: 'grocery', title: 'Order groceries' },
-    { id: 'ride', title: 'Book a ride' }
-    // WhatsApp allows max 3 buttons — use sendList for more (e.g. add "package")
+  return sendButtons(from, "Welcome to Express Bike Dispatch! How can we help you today?", [
+    { id: 'package', title: 'Send a Package' }
   ]);
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WhatsApp bot listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`WhatsApp bot listening on port ${PORT}`));          
