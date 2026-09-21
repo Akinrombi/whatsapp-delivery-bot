@@ -10,10 +10,36 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Temporary in-memory user sessions
 const userSessions = {};
 
-// Webhook Verification
+// Custom Menu Database per Restaurant
+const RESTAURANT_MENUS = {
+  rest_chicken: {
+    name: 'Chicken Republic',
+    items: [
+      { id: 'item_cr_refuel', title: 'Refuel Max Combo', description: 'Jollof rice, fried chicken & drink' },
+      { id: 'item_cr_citizen', title: 'Citizen Meal', description: 'Fried rice & 1pc fried chicken' },
+      { id: 'item_cr_pie', title: 'Chicken Pie', description: 'Freshly baked meat pastry' }
+    ]
+  },
+  rest_mega: {
+    name: 'Mega Chicken',
+    items: [
+      { id: 'item_mc_friedrice', title: 'Special Fried Rice', description: 'Served with grilled chicken' },
+      { id: 'item_mc_burger', title: 'Mega Beef Burger', description: 'Loaded double patty burger' },
+      { id: 'item_mc_spag', title: 'Singaporian Noodles', description: 'Spicy pasta with prawns & chicken' }
+    ]
+  },
+  rest_mama: {
+    name: 'Mama Cass',
+    items: [
+      { id: 'item_mk_egusi', title: 'Pounded Yam & Egusi', description: 'Served with assorted meat' },
+      { id: 'item_mk_ofada', title: 'Ofada Rice Special', description: 'Local rice with spicy ayamase sauce' },
+      { id: 'item_mk_amala', title: 'Amala & Ewedu', description: 'Served with gbegiri and goat meat' }
+    ]
+  }
+};
+
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -26,7 +52,6 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Incoming Message Webhook
 app.post('/webhook', async (req, res) => {
   res.status(200).send('EVENT_RECEIVED');
 
@@ -59,25 +84,23 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Bot Flow Logic
 async function handleMessage(from, session, input) {
   const text = input ? input.toLowerCase() : '';
 
-  // Reset/Start Command
   if (text === 'hi' || text === 'hello' || text === 'start' || text === '/menu' || !input) {
     userSessions[from] = { step: 'IDLE' };
     return await showMainMenu(from);
   }
 
-  // --- ROUTING FROM MAIN MENU LIST ---
+  // --- MAIN MENU ROUTING ---
   if (input === 'svc_dispatch') {
     userSessions[from] = { step: 'SELECT_PACKAGE_TYPE', serviceCategory: 'Dispatch' };
     return await sendPackageTypeList(from);
   }
 
   if (input === 'svc_food') {
-    userSessions[from] = { step: 'SELECT_FOOD_ITEM', serviceCategory: 'Food Order' };
-    return await sendFoodMenu(from);
+    userSessions[from] = { step: 'SELECT_RESTAURANT', serviceCategory: 'Food Order' };
+    return await sendRestaurantList(from);
   }
 
   if (input === 'svc_ride') {
@@ -115,14 +138,29 @@ async function handleMessage(from, session, input) {
     return await sendWhatsAppMessage(from, summary);
   }
 
-  // --- FOOD FLOW ---
-  if (session.step === 'SELECT_FOOD_ITEM' || input.startsWith('opt_food_')) {
-    let meal = 'Meal Combo';
-    if (input === 'opt_food_rice') meal = 'Jollof Rice & Chicken';
-    if (input === 'opt_food_burger') meal = 'Burger & Fries';
+  // --- FOOD FLOW (RESTAURANT -> SPECIFIC MENU -> ADDRESS) ---
+  if (session.step === 'SELECT_RESTAURANT' || RESTAURANT_MENUS[input]) {
+    const restaurantData = RESTAURANT_MENUS[input] || RESTAURANT_MENUS['rest_chicken'];
 
-    userSessions[from] = { ...session, step: 'AWAITING_FOOD_ADDRESS', item: meal };
-    return await sendWhatsAppMessage(from, `Selected: *${meal}*\n\nPlease type your *Delivery Address*:`);
+    userSessions[from] = { 
+      ...session, 
+      step: 'SELECT_FOOD_ITEM', 
+      restaurantKey: input,
+      restaurantName: restaurantData.name 
+    };
+    return await sendFoodMenu(from, input);
+  }
+
+  if (session.step === 'SELECT_FOOD_ITEM' || input.startsWith('item_')) {
+    const restData = RESTAURANT_MENUS[session.restaurantKey] || RESTAURANT_MENUS['rest_chicken'];
+    const selectedItemObj = restData.items.find(i => i.id === input);
+    const itemName = selectedItemObj ? selectedItemObj.title : 'Food Combo';
+
+    userSessions[from] = { ...session, step: 'AWAITING_FOOD_ADDRESS', item: itemName };
+    return await sendWhatsAppMessage(
+      from, 
+      `Selected *${itemName}* from *${session.restaurantName}*.\n\nPlease type your *Delivery Address*:`
+    );
   }
 
   if (session.step === 'AWAITING_FOOD_ADDRESS') {
@@ -131,6 +169,7 @@ async function handleMessage(from, session, input) {
     userSessions[from] = session;
 
     const summary = `🍔 *Food Order Summary*\n\n` +
+      `• Restaurant: ${session.restaurantName}\n` +
       `• Item: ${session.item}\n` +
       `• Delivery Address: ${session.dropoff}\n\n` +
       `Reply *YES* to confirm or *NO* to cancel.`;
@@ -176,7 +215,7 @@ async function handleMessage(from, session, input) {
   return await showMainMenu(from);
 }
 
-// Main Menu List
+// 1. Main Services Menu
 async function showMainMenu(to) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -205,7 +244,63 @@ async function showMainMenu(to) {
   return await callWhatsAppAPI(payload);
 }
 
-// Package Selection List
+// 2. Restaurant List
+async function sendRestaurantList(to) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: 'Select Restaurant' },
+      body: { text: 'Choose where you would like to order from:' },
+      action: {
+        button: 'Select Restaurant',
+        sections: [
+          {
+            title: 'Available Spots',
+            rows: [
+              { id: 'rest_chicken', title: 'Chicken Republic', description: 'Fried chicken & fast food' },
+              { id: 'rest_mega', title: 'Mega Chicken', description: 'Local & continental dishes' },
+              { id: 'rest_mama', title: 'Mama Cass', description: 'Traditional African meals' }
+            ]
+          }
+        ]
+      }
+    }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// 3. Dynamic Food Menu Generator based on Restaurant ID
+async function sendFoodMenu(to, restaurantKey) {
+  const restaurant = RESTAURANT_MENUS[restaurantKey] || RESTAURANT_MENUS['rest_chicken'];
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: `${restaurant.name}` },
+      body: { text: `Select your meal from ${restaurant.name}:` },
+      action: {
+        button: 'View Meals',
+        sections: [
+          {
+            title: 'Menu Items',
+            rows: restaurant.items
+          }
+        ]
+      }
+    }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// 4. Dispatch Package Options
 async function sendPackageTypeList(to) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -233,35 +328,7 @@ async function sendPackageTypeList(to) {
   return await callWhatsAppAPI(payload);
 }
 
-// Food Menu List
-async function sendFoodMenu(to) {
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: to,
-    type: 'interactive',
-    interactive: {
-      type: 'list',
-      header: { type: 'text', text: 'Food Menu' },
-      body: { text: 'Choose your meal:' },
-      action: {
-        button: 'View Menu',
-        sections: [
-          {
-            title: 'Popular Items',
-            rows: [
-              { id: 'opt_food_rice', title: 'Jollof & Chicken', description: 'Tasty hot meal' },
-              { id: 'opt_food_burger', title: 'Burger & Fries', description: 'Fast food combo' }
-            ]
-          }
-        ]
-      }
-    }
-  };
-
-  return await callWhatsAppAPI(payload);
-}
-
-// Helper: Send Text
+// Helper: Text Message Sender
 async function sendWhatsAppMessage(to, text) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -273,7 +340,7 @@ async function sendWhatsAppMessage(to, text) {
   return await callWhatsAppAPI(payload);
 }
 
-// Helper: Post payload
+// Helper: Meta API Request
 async function callWhatsAppAPI(payload) {
   try {
     const url = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
@@ -289,5 +356,5 @@ async function callWhatsAppAPI(payload) {
 }
 
 app.listen(PORT, () => {
-  console.log(`WhatsApp multi-service bot listening on port ${PORT}`);
+  console.log(`WhatsApp bot running on port ${PORT}`);
 });
