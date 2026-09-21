@@ -1,160 +1,25 @@
-require('dotenv').config();
 const express = require('express');
-const fetch = require('node-fetch');
+const axios = require('axios');
+require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
-const {
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_ID,
-  VERIFY_TOKEN,
-  ORDERS_API_URL
-} = process.env;
+const PORT = process.env.PORT || 10000;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-const GRAPH_URL = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
+// Temporary in-memory user sessions
+const userSessions = {};
 
-// ---- In-memory conversation state ----
-const sessions = new Map();
-
-function getSession(phone) {
-  if (!sessions.has(phone)) {
-    sessions.set(phone, { step: 'menu', service: null, cart: [], address: null });
-  }
-  return sessions.get(phone);
-}
-
-function resetSession(phone) {
-  sessions.set(phone, { step: 'menu', service: null, cart: [], address: null });
-}
-
-// ---- Package Catalog ----
-const CATALOGS = {
-  package: [
-    { id: 'p1', name: 'Standard Local Express (0–3 km)', price: 700 },
-    { id: 'p2', name: 'Extended Local Express (3–5 km)', price: 1200 }
-  ]
-};
-
-// ---- WhatsApp Message Senders ----
-async function sendText(to, body) {
-  try {
-    const res = await fetch(GRAPH_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body }
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) console.error('Error sending text:', data);
-  } catch (err) {
-    console.error('Network error in sendText:', err);
-  }
-}
-
-async function sendButtons(to, bodyText, buttons) {
-  try {
-    const res = await fetch(GRAPH_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: bodyText },
-          action: {
-            buttons: buttons.map(b => ({
-              type: 'reply',
-              reply: { id: b.id, title: b.title }
-            }))
-          }
-        }
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) console.error('Error sending buttons:', data);
-  } catch (err) {
-    console.error('Network error in sendButtons:', err);
-  }
-}
-
-async function sendList(to, bodyText, sectionTitle, rows) {
-  try {
-    const res = await fetch(GRAPH_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          body: { text: bodyText },
-          action: {
-            button: 'View Options',
-            sections: [{ title: sectionTitle, rows }]
-          }
-        }
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) console.error('Error sending list:', data);
-  } catch (err) {
-    console.error('Network error in sendList:', err);
-  }
-}
-
-// ---- Order Handler ----
-async function createOrder(phone, session) {
-  const order = {
-    id: 'ORD-' + Date.now(),
-    customerPhone: phone,
-    type: session.service,
-    items: session.cart,
-    address: session.address,
-    source: 'whatsapp'
-  };
-
-  console.log('NEW ORDER CREATED:', order);
-
-  // Safely attempt backend POST only if a real URL is provided
-  if (ORDERS_API_URL && !ORDERS_API_URL.includes('example.com')) {
-    try {
-      await fetch(ORDERS_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(order)
-      });
-    } catch (err) {
-      console.error('Failed to push order to external backend:', err.message);
-    }
-  }
-
-  return order;
-}
-
-// ---- Webhook Verification (GET) ----
+// Webhook Verification (Meta setup)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+  if (mode && token === VERIFY_TOKEN) {
     console.log('Webhook verified successfully!');
     res.status(200).send(challenge);
   } else {
@@ -162,105 +27,203 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// ---- Incoming Messages (POST) ----
+// Incoming Message Webhook
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Always respond 200 OK immediately to Meta
-
-  const entry = req.body.entry?.[0];
-  const change = entry?.changes?.[0];
-  const message = change?.value?.messages?.[0];
-  if (!message) return;
-
-  const from = message.from;
-  const session = getSession(from);
-
-  const text = message.text?.body?.trim().toLowerCase();
-  const buttonId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id;
-  const input = buttonId || text;
+  res.status(200).send('EVENT_RECEIVED');
 
   try {
-    await handleMessage(from, session, input);
-  } catch (err) {
-    console.error('Error handling message:', err);
-    await sendText(from, "Something went wrong — let's restart.");
-    resetSession(from);
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const message = value?.messages?.[0];
+
+    if (!message) return;
+
+    const from = message.from; // Sender's WhatsApp ID
+    const session = userSessions[from] || { step: 'IDLE' };
+
+    let userText = '';
+
+    if (message.type === 'text') {
+      userText = message.text.body.trim();
+    } else if (message.type === 'interactive') {
+      if (message.interactive.type === 'button_reply') {
+        userText = message.interactive.button_reply.id;
+      } else if (message.interactive.type === 'list_reply') {
+        userText = message.interactive.list_reply.id;
+      }
+    }
+
+    await handleMessage(from, session, userText);
+  } catch (error) {
+    console.error('Error handling webhook payload:', error.message);
   }
 });
 
-// ---- State Machine Logic ----
+// Main Bot Navigation & Flow Logic
 async function handleMessage(from, session, input) {
-  if (input === 'restart' || input === 'menu' || input === 'hi' || input === 'hello') {
-    resetSession(from);
-    return showServiceMenu(from);
+  const text = input ? input.toLowerCase() : '';
+
+  // Reset/Start Command
+  if (text === 'hi' || text === 'hello' || text === 'start' || text === '/order' || !input) {
+    userSessions[from] = { step: 'IDLE' };
+    return await showServiceMenu(from);
   }
 
-  switch (session.step) {
-    case 'menu':
-      return showServiceMenu(from);
+  // Step 1: User tapped "Send a Package" button
+  if (input === 'btn_send_package' || text.includes('send a package')) {
+    userSessions[from] = { step: 'SELECT_SERVICE' };
+    return await sendDeliveryList(from);
+  }
 
-    case 'awaiting_service': {
-      if (!CATALOGS[input]) {
-        return sendText(from, "Please tap one of the option buttons above.");
-      }
-      session.service = input;
-      session.step = 'awaiting_item';
-      const rows = CATALOGS[input].map(item => ({
-        id: item.id,
-        title: item.name,
-        description: `₦${item.price.toLocaleString()}`
-      }));
-      return sendList(from, "Select your parcel size/distance:", "Delivery Options", rows);
-    }
+  // Step 2: User selected an option from the Interactive List
+  if (session.step === 'SELECT_SERVICE' || input.startsWith('opt_')) {
+    let serviceType = 'Standard Delivery';
+    if (input === 'opt_express') serviceType = 'Express Delivery';
+    if (input === 'opt_intercity') serviceType = 'Intercity Delivery';
 
-    case 'awaiting_item': {
-      const catalog = CATALOGS[session.service];
-      const item = catalog.find(i => i.id === input);
-      if (!item) return sendText(from, "Please select a valid option from the menu list.");
-      session.cart.push(item);
-      session.step = 'awaiting_address';
-      return sendText(from, `Selected: *${item.name}*.\n\nPlease reply with your Pickup Location and Drop-off Address:`);
-    }
+    userSessions[from] = { step: 'AWAITING_PICKUP', service: serviceType };
+    return await sendWhatsAppMessage(
+      from,
+      `You selected *${serviceType}*.\n\nPlease type the *Pickup Address*:`
+    );
+  }
 
-    case 'awaiting_address': {
-      session.address = input;
-      session.step = 'confirm';
-      const itemNames = session.cart.map(i => i.name).join(', ');
-      const total = session.cart.reduce((sum, i) => sum + (i.price || 0), 0);
-      return sendButtons(
+  // Step 3: Collect Pickup Location
+  if (session.step === 'AWAITING_PICKUP') {
+    session.pickup = input;
+    session.step = 'AWAITING_DROPOFF';
+    userSessions[from] = session;
+    return await sendWhatsAppMessage(
+      from,
+      `Pickup saved: *${input}*\n\nNow, please type the *Drop-off Address*:`
+    );
+  }
+
+  // Step 4: Collect Drop-off Location & Show Order Confirmation
+  if (session.step === 'AWAITING_DROPOFF') {
+    session.dropoff = input;
+    session.step = 'CONFIRM_ORDER';
+    userSessions[from] = session;
+
+    const summary = `📦 *Order Summary*\n\n` +
+      `• *Service:* ${session.service}\n` +
+      `• *Pickup:* ${session.pickup}\n` +
+      `• *Drop-off:* ${session.dropoff}\n\n` +
+      `Reply *YES* to confirm your dispatch request or *NO* to cancel.`;
+
+    return await sendWhatsAppMessage(from, summary);
+  }
+
+  // Step 5: Final Order Confirmation
+  if (session.step === 'CONFIRM_ORDER') {
+    if (text === 'yes') {
+      userSessions[from] = { step: 'IDLE' };
+      return await sendWhatsAppMessage(
         from,
-        `Confirm your delivery booking:\n• Service: ${itemNames}\n• Locations: ${session.address}\n• Total: ₦${total.toLocaleString()}`,
-        [{ id: 'confirm_yes', title: 'Confirm Order' }, { id: 'confirm_no', title: 'Cancel' }]
+        `✅ *Order Received!* A rider will be assigned to pick up your package shortly. Thank you for choosing us!`
       );
+    } else if (text === 'no') {
+      userSessions[from] = { step: 'IDLE' };
+      return await sendWhatsAppMessage(from, `❌ Order canceled. Type "Hi" anytime to start again.`);
     }
+  }
 
-    case 'confirm': {
-      if (input === 'confirm_yes') {
-        const order = await createOrder(from, session);
-        await sendText(
-          from,
-          `✅ Order Placed!\nRef Code: ${order.id}\n\nOur bicycle dispatch rider will contact you in a moment for pickup.`
-        );
-        resetSession(from);
-      } else {
-        await sendText(from, "Order cancelled. Send 'Hi' whenever you are ready to book again!");
-        resetSession(from);
+  // Fallback for unhandled input
+  return await showServiceMenu(from);
+}
+
+// 1. Send Interactive Welcome Button
+async function showServiceMenu(to) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      body: { text: 'Welcome to Express Bike Dispatch!\nHow can we help you today?' },
+      action: {
+        buttons: [
+          {
+            type: 'reply',
+            reply: { id: 'btn_send_package', title: 'Send a Package' }
+          }
+        ]
       }
-      return;
     }
+  };
 
-    default:
-      resetSession(from);
-      return showServiceMenu(from);
+  return await callWhatsAppAPI(payload);
+}
+
+// 2. Send Interactive List (Titles strictly capped <= 24 chars to avoid Error 131009)
+async function sendDeliveryList(to) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: 'Select Delivery Type' },
+      body: { text: 'Choose the option that best fits your dispatch urgency:' },
+      action: {
+        button: 'View Options',
+        sections: [
+          {
+            title: 'Available Services',
+            rows: [
+              {
+                id: 'opt_standard',
+                title: 'Standard Delivery', // 17 chars (Valid < 24)
+                description: 'Delivered within 2-3 hours'
+              },
+              {
+                id: 'opt_express',
+                title: 'Express Delivery', // 16 chars (Valid < 24)
+                description: 'Direct pickup & instant drop'
+              },
+              {
+                id: 'opt_intercity',
+                title: 'Intercity Dispatch', // 18 chars (Valid < 24)
+                description: 'For deliveries outside town'
+              }
+            ]
+          }
+        ]
+      }
+    }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// Helper: Send Plain Text Message
+async function sendWhatsAppMessage(to, text) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'text',
+    text: { body: text }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// Helper: Post payload to Meta Cloud API
+async function callWhatsAppAPI(payload) {
+  try {
+    const url = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
+    await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error('Error sending WhatsApp message:', error.response?.data || error.message);
   }
 }
 
-async function showServiceMenu(from) {
-  const session = getSession(from);
-  session.step = 'awaiting_service';
-  return sendButtons(from, "Welcome to Express Bike Dispatch! How can we help you today?", [
-    { id: 'package', title: 'Send a Package' }
-  ]);
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WhatsApp bot listening on port ${PORT}`));          
+app.listen(PORT, () => {
+  console.log(`WhatsApp bot listening on port ${PORT}`);
+});
