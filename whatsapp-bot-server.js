@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
@@ -10,9 +11,14 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
+// Supabase Initialization
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
 const userSessions = {};
 
-// Custom Menu Database per Restaurant
+// Custom Menu Database
 const RESTAURANT_MENUS = {
   rest_chicken: {
     name: 'Chicken Republic',
@@ -92,7 +98,7 @@ async function handleMessage(from, session, input) {
     return await showMainMenu(from);
   }
 
-  // --- MAIN MENU ROUTING ---
+  // MAIN MENU ROUTING
   if (input === 'svc_dispatch') {
     userSessions[from] = { step: 'SELECT_PACKAGE_TYPE', serviceCategory: 'Dispatch' };
     return await sendPackageTypeList(from);
@@ -108,7 +114,7 @@ async function handleMessage(from, session, input) {
     return await sendWhatsAppMessage(from, `🚕 *Ride Booking*\n\nPlease type your *Pickup Location*:`);
   }
 
-  // --- DISPATCH FLOW ---
+  // DISPATCH FLOW
   if (session.step === 'SELECT_PACKAGE_TYPE' || input.startsWith('opt_pkg_')) {
     let pkgType = 'Standard Delivery';
     if (input === 'opt_pkg_express') pkgType = 'Express Delivery';
@@ -138,7 +144,7 @@ async function handleMessage(from, session, input) {
     return await sendWhatsAppMessage(from, summary);
   }
 
-  // --- FOOD FLOW (RESTAURANT -> SPECIFIC MENU -> ADDRESS) ---
+  // FOOD FLOW
   if (session.step === 'SELECT_RESTAURANT' || RESTAURANT_MENUS[input]) {
     const restaurantData = RESTAURANT_MENUS[input] || RESTAURANT_MENUS['rest_chicken'];
 
@@ -177,7 +183,7 @@ async function handleMessage(from, session, input) {
     return await sendWhatsAppMessage(from, summary);
   }
 
-  // --- RIDE FLOW ---
+  // RIDE FLOW
   if (session.step === 'AWAITING_RIDE_PICKUP') {
     session.pickup = input;
     session.step = 'AWAITING_RIDE_DESTINATION';
@@ -198,13 +204,39 @@ async function handleMessage(from, session, input) {
     return await sendWhatsAppMessage(from, summary);
   }
 
-  // --- CONFIRMATION HANDLER ---
+  // CONFIRMATION & SUPABASE DATABASE SAVE
   if (session.step === 'CONFIRM_ORDER') {
     if (text === 'yes') {
+      try {
+        if (session.serviceCategory === 'Ride Booking') {
+          await supabase.from('ride_requests').insert([
+            {
+              customer_phone: from,
+              pickup_address: session.pickup,
+              destination_address: session.dropoff,
+              status: 'SEARCHING'
+            }
+          ]);
+        } else {
+          await supabase.from('orders').insert([
+            {
+              customer_phone: from,
+              order_type: session.serviceCategory === 'Food Order' ? 'FOOD' : 'DISPATCH',
+              item_details: session.item || session.subType || 'Package',
+              pickup_address: session.pickup || null,
+              delivery_address: session.dropoff,
+              status: 'PENDING'
+            }
+          ]);
+        }
+      } catch (err) {
+        console.error('Error persisting to Supabase:', err.message);
+      }
+
       userSessions[from] = { step: 'IDLE' };
       return await sendWhatsAppMessage(
         from,
-        `✅ *Order Confirmed!* We are processing your request now. Thank you!`
+        `✅ *Order Confirmed & Saved!* We are processing your request now. Thank you!`
       );
     } else if (text === 'no') {
       userSessions[from] = { step: 'IDLE' };
@@ -215,7 +247,7 @@ async function handleMessage(from, session, input) {
   return await showMainMenu(from);
 }
 
-// 1. Main Services Menu
+// WhatsApp Dynamic Menu Generators
 async function showMainMenu(to) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -240,11 +272,9 @@ async function showMainMenu(to) {
       }
     }
   };
-
   return await callWhatsAppAPI(payload);
 }
 
-// 2. Restaurant List
 async function sendRestaurantList(to) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -269,14 +299,11 @@ async function sendRestaurantList(to) {
       }
     }
   };
-
   return await callWhatsAppAPI(payload);
 }
 
-// 3. Dynamic Food Menu Generator based on Restaurant ID
 async function sendFoodMenu(to, restaurantKey) {
   const restaurant = RESTAURANT_MENUS[restaurantKey] || RESTAURANT_MENUS['rest_chicken'];
-
   const payload = {
     messaging_product: 'whatsapp',
     to: to,
@@ -287,20 +314,13 @@ async function sendFoodMenu(to, restaurantKey) {
       body: { text: `Select your meal from ${restaurant.name}:` },
       action: {
         button: 'View Meals',
-        sections: [
-          {
-            title: 'Menu Items',
-            rows: restaurant.items
-          }
-        ]
+        sections: [{ title: 'Menu Items', rows: restaurant.items }]
       }
     }
   };
-
   return await callWhatsAppAPI(payload);
 }
 
-// 4. Dispatch Package Options
 async function sendPackageTypeList(to) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -324,11 +344,9 @@ async function sendPackageTypeList(to) {
       }
     }
   };
-
   return await callWhatsAppAPI(payload);
 }
 
-// Helper: Text Message Sender
 async function sendWhatsAppMessage(to, text) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -336,11 +354,9 @@ async function sendWhatsAppMessage(to, text) {
     type: 'text',
     text: { body: text }
   };
-
   return await callWhatsAppAPI(payload);
 }
 
-// Helper: Meta API Request
 async function callWhatsAppAPI(payload) {
   try {
     const url = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
