@@ -12,8 +12,8 @@ const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 // Supabase Initialization
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseUrl = (process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co').trim();
+const supabaseKey = (process.env.SUPABASE_KEY || '').trim();
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const userSessions = {};
