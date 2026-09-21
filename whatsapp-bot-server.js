@@ -11,8 +11,8 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Supabase Initialization
-const supabaseUrl = (process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co').trim();
+// Supabase Initialization (Cleaned & Hardcoded URL to prevent string parsing errors)
+const supabaseUrl = 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
 const supabaseKey = (process.env.SUPABASE_KEY || '').trim();
 const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -373,4 +373,4 @@ async function callWhatsAppAPI(payload) {
 
 app.listen(PORT, () => {
   console.log(`WhatsApp bot running on port ${PORT}`);
-});
+}); 
