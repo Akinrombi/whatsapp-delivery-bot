@@ -1,14 +1,14 @@
 {
   "name": "whatsapp-delivery-bot",
   "version": "1.0.0",
-  "description": "WhatsApp ordering bot for a multi-service delivery platform (food, grocery, package, ride)",
+  "description": "WhatsApp dispatch bot for bike delivery",
   "main": "whatsapp-bot-server.js",
   "scripts": {
     "start": "node whatsapp-bot-server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "axios": "^1.7.2",
     "dotenv": "^16.4.5",
-    "node-fetch": "^2.7.0"
+    "express": "^4.19.2"
   }
 }
