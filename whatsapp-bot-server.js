@@ -13,14 +13,13 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 // Temporary in-memory user sessions
 const userSessions = {};
 
-// Webhook Verification (Meta setup)
+// Webhook Verification
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
   if (mode && token === VERIFY_TOKEN) {
-    console.log('Webhook verified successfully!');
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
@@ -39,7 +38,7 @@ app.post('/webhook', async (req, res) => {
 
     if (!message) return;
 
-    const from = message.from; // Sender's WhatsApp ID
+    const from = message.from;
     const session = userSessions[from] || { step: 'IDLE' };
 
     let userText = '';
@@ -56,137 +55,146 @@ app.post('/webhook', async (req, res) => {
 
     await handleMessage(from, session, userText);
   } catch (error) {
-    console.error('Error handling webhook payload:', error.message);
+    console.error('Webhook error:', error.message);
   }
 });
 
-// Main Bot Navigation & Flow Logic
+// Bot Flow Logic
 async function handleMessage(from, session, input) {
   const text = input ? input.toLowerCase() : '';
 
   // Reset/Start Command
-  if (text === 'hi' || text === 'hello' || text === 'start' || text === '/order' || !input) {
+  if (text === 'hi' || text === 'hello' || text === 'start' || text === '/menu' || !input) {
     userSessions[from] = { step: 'IDLE' };
-    return await showServiceMenu(from);
+    return await showMainMenu(from);
   }
 
-  // Step 1: User tapped "Send a Package" button
-  if (input === 'btn_send_package' || text.includes('send a package')) {
-    userSessions[from] = { step: 'SELECT_SERVICE' };
-    return await sendDeliveryList(from);
+  // --- ROUTING FROM MAIN MENU LIST ---
+  if (input === 'svc_dispatch') {
+    userSessions[from] = { step: 'SELECT_PACKAGE_TYPE', serviceCategory: 'Dispatch' };
+    return await sendPackageTypeList(from);
   }
 
-  // Step 2: User selected an option from the Interactive List
-  if (session.step === 'SELECT_SERVICE' || input.startsWith('opt_')) {
-    let serviceType = 'Standard Delivery';
-    if (input === 'opt_express') serviceType = 'Express Delivery';
-    if (input === 'opt_intercity') serviceType = 'Intercity Delivery';
-
-    userSessions[from] = { step: 'AWAITING_PICKUP', service: serviceType };
-    return await sendWhatsAppMessage(
-      from,
-      `You selected *${serviceType}*.\n\nPlease type the *Pickup Address*:`
-    );
+  if (input === 'svc_food') {
+    userSessions[from] = { step: 'SELECT_FOOD_ITEM', serviceCategory: 'Food Order' };
+    return await sendFoodMenu(from);
   }
 
-  // Step 3: Collect Pickup Location
-  if (session.step === 'AWAITING_PICKUP') {
+  if (input === 'svc_ride') {
+    userSessions[from] = { step: 'AWAITING_RIDE_PICKUP', serviceCategory: 'Ride Booking' };
+    return await sendWhatsAppMessage(from, `🚕 *Ride Booking*\n\nPlease type your *Pickup Location*:`);
+  }
+
+  // --- DISPATCH FLOW ---
+  if (session.step === 'SELECT_PACKAGE_TYPE' || input.startsWith('opt_pkg_')) {
+    let pkgType = 'Standard Delivery';
+    if (input === 'opt_pkg_express') pkgType = 'Express Delivery';
+
+    userSessions[from] = { ...session, step: 'AWAITING_PKG_PICKUP', subType: pkgType };
+    return await sendWhatsAppMessage(from, `Selected: *${pkgType}*\n\nPlease type the *Pickup Address*:`);
+  }
+
+  if (session.step === 'AWAITING_PKG_PICKUP') {
     session.pickup = input;
-    session.step = 'AWAITING_DROPOFF';
+    session.step = 'AWAITING_PKG_DROPOFF';
     userSessions[from] = session;
-    return await sendWhatsAppMessage(
-      from,
-      `Pickup saved: *${input}*\n\nNow, please type the *Drop-off Address*:`
-    );
+    return await sendWhatsAppMessage(from, `Pickup saved: *${input}*\n\nNow enter the *Drop-off Address*:`);
   }
 
-  // Step 4: Collect Drop-off Location & Show Order Confirmation
-  if (session.step === 'AWAITING_DROPOFF') {
+  if (session.step === 'AWAITING_PKG_DROPOFF') {
     session.dropoff = input;
     session.step = 'CONFIRM_ORDER';
     userSessions[from] = session;
 
-    const summary = `📦 *Order Summary*\n\n` +
-      `• *Service:* ${session.service}\n` +
-      `• *Pickup:* ${session.pickup}\n` +
-      `• *Drop-off:* ${session.dropoff}\n\n` +
-      `Reply *YES* to confirm your dispatch request or *NO* to cancel.`;
+    const summary = `📦 *Dispatch Summary*\n\n` +
+      `• Type: ${session.subType}\n` +
+      `• Pickup: ${session.pickup}\n` +
+      `• Drop-off: ${session.dropoff}\n\n` +
+      `Reply *YES* to confirm or *NO* to cancel.`;
 
     return await sendWhatsAppMessage(from, summary);
   }
 
-  // Step 5: Final Order Confirmation
+  // --- FOOD FLOW ---
+  if (session.step === 'SELECT_FOOD_ITEM' || input.startsWith('opt_food_')) {
+    let meal = 'Meal Combo';
+    if (input === 'opt_food_rice') meal = 'Jollof Rice & Chicken';
+    if (input === 'opt_food_burger') meal = 'Burger & Fries';
+
+    userSessions[from] = { ...session, step: 'AWAITING_FOOD_ADDRESS', item: meal };
+    return await sendWhatsAppMessage(from, `Selected: *${meal}*\n\nPlease type your *Delivery Address*:`);
+  }
+
+  if (session.step === 'AWAITING_FOOD_ADDRESS') {
+    session.dropoff = input;
+    session.step = 'CONFIRM_ORDER';
+    userSessions[from] = session;
+
+    const summary = `🍔 *Food Order Summary*\n\n` +
+      `• Item: ${session.item}\n` +
+      `• Delivery Address: ${session.dropoff}\n\n` +
+      `Reply *YES* to confirm or *NO* to cancel.`;
+
+    return await sendWhatsAppMessage(from, summary);
+  }
+
+  // --- RIDE FLOW ---
+  if (session.step === 'AWAITING_RIDE_PICKUP') {
+    session.pickup = input;
+    session.step = 'AWAITING_RIDE_DESTINATION';
+    userSessions[from] = session;
+    return await sendWhatsAppMessage(from, `Pickup saved: *${input}*\n\nWhere are you heading? (*Destination*):`);
+  }
+
+  if (session.step === 'AWAITING_RIDE_DESTINATION') {
+    session.dropoff = input;
+    session.step = 'CONFIRM_ORDER';
+    userSessions[from] = session;
+
+    const summary = `🚕 *Ride Request Summary*\n\n` +
+      `• From: ${session.pickup}\n` +
+      `• To: ${session.dropoff}\n\n` +
+      `Reply *YES* to confirm your request or *NO* to cancel.`;
+
+    return await sendWhatsAppMessage(from, summary);
+  }
+
+  // --- CONFIRMATION HANDLER ---
   if (session.step === 'CONFIRM_ORDER') {
     if (text === 'yes') {
       userSessions[from] = { step: 'IDLE' };
       return await sendWhatsAppMessage(
         from,
-        `✅ *Order Received!* A rider will be assigned to pick up your package shortly. Thank you for choosing us!`
+        `✅ *Order Confirmed!* We are processing your request now. Thank you!`
       );
     } else if (text === 'no') {
       userSessions[from] = { step: 'IDLE' };
-      return await sendWhatsAppMessage(from, `❌ Order canceled. Type "Hi" anytime to start again.`);
+      return await sendWhatsAppMessage(from, `❌ Request canceled. Type "Hi" to return to the main menu.`);
     }
   }
 
-  // Fallback for unhandled input
-  return await showServiceMenu(from);
+  return await showMainMenu(from);
 }
 
-// 1. Send Interactive Welcome Button
-async function showServiceMenu(to) {
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: to,
-    type: 'interactive',
-    interactive: {
-      type: 'button',
-      body: { text: 'Welcome to Express Bike Dispatch!\nHow can we help you today?' },
-      action: {
-        buttons: [
-          {
-            type: 'reply',
-            reply: { id: 'btn_send_package', title: 'Send a Package' }
-          }
-        ]
-      }
-    }
-  };
-
-  return await callWhatsAppAPI(payload);
-}
-
-// 2. Send Interactive List (Titles strictly capped <= 24 chars to avoid Error 131009)
-async function sendDeliveryList(to) {
+// Main Menu List
+async function showMainMenu(to) {
   const payload = {
     messaging_product: 'whatsapp',
     to: to,
     type: 'interactive',
     interactive: {
       type: 'list',
-      header: { type: 'text', text: 'Select Delivery Type' },
-      body: { text: 'Choose the option that best fits your dispatch urgency:' },
+      header: { type: 'text', text: 'Welcome to Express Services' },
+      body: { text: 'How can we help you today? Please select an option:' },
       action: {
-        button: 'View Options',
+        button: 'Main Menu',
         sections: [
           {
-            title: 'Available Services',
+            title: 'Our Services',
             rows: [
-              {
-                id: 'opt_standard',
-                title: 'Standard Delivery', // 17 chars (< 24)
-                description: 'Delivered within 2-3 hours'
-              },
-              {
-                id: 'opt_express',
-                title: 'Express Delivery', // 16 chars (< 24)
-                description: 'Direct pickup & instant drop'
-              },
-              {
-                id: 'opt_intercity',
-                title: 'Intercity Dispatch', // 18 chars (< 24)
-                description: 'For deliveries outside town'
-              }
+              { id: 'svc_dispatch', title: 'Package Dispatch', description: 'Send parcels via bike courier' },
+              { id: 'svc_food', title: 'Food Ordering', description: 'Order meals from restaurants' },
+              { id: 'svc_ride', title: 'Book a Ride', description: 'Request a bike or taxi ride' }
             ]
           }
         ]
@@ -197,7 +205,63 @@ async function sendDeliveryList(to) {
   return await callWhatsAppAPI(payload);
 }
 
-// Helper: Send Plain Text Message
+// Package Selection List
+async function sendPackageTypeList(to) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: 'Dispatch Service' },
+      body: { text: 'Select package speed:' },
+      action: {
+        button: 'Select Speed',
+        sections: [
+          {
+            title: 'Options',
+            rows: [
+              { id: 'opt_pkg_standard', title: 'Standard Delivery', description: 'Delivered in 2-3 hours' },
+              { id: 'opt_pkg_express', title: 'Express Delivery', description: 'Direct instant pickup' }
+            ]
+          }
+        ]
+      }
+    }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// Food Menu List
+async function sendFoodMenu(to) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: 'Food Menu' },
+      body: { text: 'Choose your meal:' },
+      action: {
+        button: 'View Menu',
+        sections: [
+          {
+            title: 'Popular Items',
+            rows: [
+              { id: 'opt_food_rice', title: 'Jollof & Chicken', description: 'Tasty hot meal' },
+              { id: 'opt_food_burger', title: 'Burger & Fries', description: 'Fast food combo' }
+            ]
+          }
+        ]
+      }
+    }
+  };
+
+  return await callWhatsAppAPI(payload);
+}
+
+// Helper: Send Text
 async function sendWhatsAppMessage(to, text) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -209,7 +273,7 @@ async function sendWhatsAppMessage(to, text) {
   return await callWhatsAppAPI(payload);
 }
 
-// Helper: Post payload to Meta Cloud API
+// Helper: Post payload
 async function callWhatsAppAPI(payload) {
   try {
     const url = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`;
@@ -225,5 +289,5 @@ async function callWhatsAppAPI(payload) {
 }
 
 app.listen(PORT, () => {
-  console.log(`WhatsApp bot listening on port ${PORT}`);
+  console.log(`WhatsApp multi-service bot listening on port ${PORT}`);
 });
