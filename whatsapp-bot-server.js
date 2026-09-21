@@ -174,17 +174,17 @@ async function sendDeliveryList(to) {
             rows: [
               {
                 id: 'opt_standard',
-                title: 'Standard Delivery', // 17 chars (Valid < 24)
+                title: 'Standard Delivery', // 17 chars (< 24)
                 description: 'Delivered within 2-3 hours'
               },
               {
                 id: 'opt_express',
-                title: 'Express Delivery', // 16 chars (Valid < 24)
+                title: 'Express Delivery', // 16 chars (< 24)
                 description: 'Direct pickup & instant drop'
               },
               {
                 id: 'opt_intercity',
-                title: 'Intercity Dispatch', // 18 chars (Valid < 24)
+                title: 'Intercity Dispatch', // 18 chars (< 24)
                 description: 'For deliveries outside town'
               }
             ]
