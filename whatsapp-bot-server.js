@@ -13,9 +13,22 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// WhatsApp Webhook Listener
+// Meta Verification Endpoint
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token === (process.env.VERIFY_TOKEN || 'my_verify_token')) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// WhatsApp Message Webhook
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Acknowledge WhatsApp instantly
+  res.sendStatus(200);
 
   try {
     const entry = req.body.entry?.[0];
@@ -24,60 +37,82 @@ app.post('/webhook', async (req, res) => {
 
     if (!message) return;
 
-    const from = message.from; // Customer's phone number
-    const text = message.text?.body?.toLowerCase();
+    const from = message.from;
     const interactive = message.interactive;
+    const messageText = message.text?.body?.toLowerCase() || '';
 
-    // 1. When Customer chooses "Food Ordering" or types "Menu" / "Food"
-    if (text === 'food ordering' || text === 'menu' || text === 'food') {
+    console.log('Incoming message from:', from, 'Text:', messageText, 'Interactive:', interactive);
+
+    // If user clicks interactive button or types text
+    if (
+      interactive?.button_reply?.id === 'food_ordering' || 
+      interactive?.list_reply?.id === 'food_ordering' ||
+      messageText.includes('food') || 
+      messageText.includes('order') ||
+      messageText === 'hi' ||
+      messageText === 'hello'
+    ) {
       await sendRestaurantList(from);
     } 
-    // 2. When Customer selects a restaurant from the interactive list
-    else if (interactive?.type === 'list_reply') {
-      const selectedVendorId = interactive.list_reply.id.replace('vendor_', '');
-      await sendVendorMenu(from, selectedVendorId);
+    // If user selects a restaurant from the list
+    else if (interactive?.type === 'list_reply' && interactive.list_reply.id.startsWith('vendor_')) {
+      const vendorId = interactive.list_reply.id.replace('vendor_', '');
+      await sendVendorMenu(from, vendorId);
     }
-  } catch (error) {
-    console.error('Error handling webhook:', error);
+  } catch (err) {
+    console.error('Error in webhook handling:', err);
   }
 });
 
-// Function to fetch and send open restaurants dynamically
-async function sendRestaurantList(toPhone) {
-  // Fetch active/open vendors from Supabase
-  const { data: vendors, error } = await supabase
-    .from('vendors')
-    .select('id, store_name, description')
-    .eq('is_open', true);
+// Function to fetch open stores from Supabase and show them in WhatsApp list
+async function sendRestaurantList(to) {
+  let stores = [];
 
-  if (error || !vendors || vendors.length === 0) {
-    await sendTextMessage(toPhone, "No restaurants are currently online. Please try again shortly!");
-    return;
+  try {
+    const { data, error } = await supabase.from('vendors').select('*');
+    if (!error && data && data.length > 0) {
+      stores = data;
+    }
+  } catch (err) {
+    console.error('Supabase query error:', err);
   }
 
-  // Build the dynamic rows array from Supabase data
-  const rows = vendors.map(v => ({
-    id: `vendor_${v.id}`,
-    title: (v.store_name || 'Restaurant').slice(0, 24), // Max 24 chars for title
-    description: (v.description || 'Delicious fresh meals').slice(0, 72) // Max 72 chars
-  }));
+  // Fallback defaults if table is empty
+  if (stores.length === 0) {
+    stores = [
+      { id: '1', store_name: 'Chicken Republic', description: 'Fried chicken & fast food' },
+      { id: '2', store_name: 'Mega Chicken', description: 'Local & continental dishes' },
+      { id: '3', store_name: 'Mama Cass', description: 'Traditional African meals' }
+    ];
+  }
 
-  // Construct WhatsApp Interactive List Message
+  // Format into Meta WhatsApp API rows
+  const rows = stores.map((s, index) => {
+    const titleText = String(s.store_name || s.name || `Store ${index + 1}`).trim();
+    const descText = String(s.description || s.address || 'Local delicacies').trim();
+
+    return {
+      id: `vendor_${s.id || index}`,
+      title: titleText.length > 24 ? titleText.substring(0, 21) + '...' : titleText,
+      description: descText.length > 72 ? descText.substring(0, 69) + '...' : descText
+    };
+  });
+
   const payload = {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: toPhone,
-    type: "interactive",
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: to,
+    type: 'interactive',
     interactive: {
-      type: "list",
-      header: { type: "text", text: "Select Restaurant" },
-      body: { text: "Choose a restaurant below to view their available menu:" },
-      footer: { text: "Tap to select an item" },
+      type: 'list',
+      header: { type: 'text', text: 'Select Restaurant' },
+      body: { text: 'How can we help you today? Please select a restaurant to view their menu:' },
+      footer: { text: 'Tap to select an item' },
       action: {
-        button: "Select Restaurant",
+        button: 'Select Restaurant',
         sections: [
           {
-            title: "Available Restaurants",
+            title: 'Available Restaurants',
             rows: rows
           }
         ]
@@ -85,46 +120,49 @@ async function sendRestaurantList(toPhone) {
     }
   };
 
-  await sendWhatsAppApiRequest(payload);
+  await sendWhatsAppRequest(payload);
 }
 
-// Function to send menu items for selected restaurant
-async function sendVendorMenu(toPhone, vendorId) {
-  const { data: menuItems, error } = await supabase
-    .from('vendor_menu')
-    .select('*')
-    .eq('vendor_id', vendorId)
-    .eq('in_stock', true);
+// Send Menu for Selected Vendor
+async function sendVendorMenu(to, vendorId) {
+  let menu = [];
 
-  if (error || !menuItems || menuItems.length === 0) {
-    await sendTextMessage(toPhone, "This restaurant currently has no items in stock.");
+  try {
+    const { data, error } = await supabase.from('vendor_menu').select('*').eq('vendor_id', vendorId);
+    if (!error && data) menu = data;
+  } catch (err) {
+    console.error('Menu query error:', err);
+  }
+
+  if (menu.length === 0) {
+    await sendTextMessage(to, 'This restaurant currently has no items in stock. Please try selecting another one!');
     return;
   }
 
-  let menuText = "🍽️ *AVAILABLE MENU*\n\n";
-  menuItems.forEach((item, index) => {
-    menuText += `${index + 1}. *${item.name}* - ₦${Number(item.price).toLocaleString()}\n`;
+  let text = '🍽️ *RESTAURANT MENU*\n\n';
+  menu.forEach((item, index) => {
+    text += `${index + 1}. *${item.name}* - ₦${Number(item.price).toLocaleString()}\n`;
   });
-  menuText += "\nReply with the item name or number to place your order!";
+  text += '\nReply with the item name to place your order!';
 
-  await sendTextMessage(toPhone, menuText);
+  await sendTextMessage(to, text);
 }
 
-// Helper: Send Text Message
-async function sendTextMessage(toPhone, textMessage) {
+// Send simple text
+async function sendTextMessage(to, message) {
   const payload = {
-    messaging_product: "whatsapp",
-    to: toPhone,
-    type: "text",
-    text: { body: textMessage }
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'text',
+    text: { body: message }
   };
-  await sendWhatsAppApiRequest(payload);
+  await sendWhatsAppRequest(payload);
 }
 
-// Helper: Send API Request to Meta WhatsApp Cloud API
-async function sendWhatsAppApiRequest(payload) {
+// Send payload to Meta API
+async function sendWhatsAppRequest(payload) {
   try {
-    await axios.post(
+    const res = await axios.post(
       `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
       payload,
       {
@@ -134,10 +172,11 @@ async function sendWhatsAppApiRequest(payload) {
         }
       }
     );
+    console.log('WhatsApp response:', res.data);
   } catch (err) {
-    console.error('Error sending WhatsApp message:', err.response?.data || err.message);
+    console.error('Failed to send message:', err.response?.data || err.message);
   }
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WhatsApp Bot listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
