@@ -162,14 +162,15 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 3. Selected a Restaurant -> Fetch Menu Items for that Vendor
+    // 3. Selected a Restaurant -> Fetch Menu Items matching restaurant_id
     if (selectedListId && selectedListId.startsWith('vendor_')) {
       const vendorId = selectedListId.replace('vendor_', '');
 
+      // Querying matching restaurant_id column from your database
       const { data: menuItems, error } = await supabase
         .from('menu_items')
         .select('*')
-        .eq('vendor_id', vendorId);
+        .eq('restaurant_id', vendorId);
 
       if (error || !menuItems || menuItems.length === 0) {
         await sendWhatsAppMessage(from, {
@@ -182,7 +183,8 @@ app.post('/webhook', async (req, res) => {
       }
 
       const menuRows = menuItems.slice(0, 10).map((item, idx) => {
-        let title = String(item.name || `Item ${idx + 1}`).trim();
+        // Using title and price columns matching your database
+        let title = String(item.title || item.name || `Item ${idx + 1}`).trim();
         let description = String(`Price: ₦${item.price || '0'}`).trim();
 
         if (title.length > 24) title = title.substring(0, 21) + '...';
