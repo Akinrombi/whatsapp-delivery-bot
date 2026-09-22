@@ -1,15 +1,17 @@
 {
   "name": "whatsapp-delivery-bot",
   "version": "1.0.0",
-  "description": "WhatsApp dispatch bot for bike delivery",
-  "main": "whatsapp-bot-server.js",
+  "description": "WhatsApp delivery bot with Supabase integration",
+  "main": "server.js",
   "scripts": {
-    "start": "node whatsapp-bot-server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0",
-    "axios": "^1.7.2",
-    "dotenv": "^16.4.5",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.8",
     "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
