@@ -42,7 +42,7 @@ app.post('/webhook', async (req, res) => {
     const text = message.text?.body ? message.text.body.trim().toLowerCase() : '';
     const interactive = message.interactive;
 
-    console.log(`📩 Message from ${from}: "${text}"`);
+    console.log(`📩 Incoming message from ${from}: "${text}"`);
 
     // Fetch vendors from Supabase
     const { data: stores, error } = await supabase.from('vendors').select('*');
@@ -51,31 +51,43 @@ app.post('/webhook', async (req, res) => {
       console.error('Supabase fetch error:', error.message);
     }
 
-    if (text === 'hi' || text === 'hello' || text.includes('food') || text.includes('order')) {
-      if (stores && stores.length > 0) {
-        // Build Interactive List Rows
-        const rows = stores.slice(0, 10).map((s, idx) => ({
-          id: `vendor_${s.id || idx}`,
-          title: (s.store_name || s.name || `Store ${idx + 1}`).substring(0, 24),
-          description: (s.description || 'View menu and order').substring(0, 72)
-        }));
+    const isFoodTrigger = text === 'hi' || text === 'hello' || text.includes('food') || text.includes('order');
 
-        await axios.post(
-          `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: from,
-            type: 'interactive',
-            interactive: {
-              type: 'list',
-              header: { type: 'text', text: 'Select Restaurant' },
-              body: { text: 'Choose a vendor below to order food:' },
-              action: {
-                button: 'View Restaurants',
-                sections: [{ title: 'Available Vendors', rows: rows }]
-              }
+    if (isFoodTrigger) {
+      if (stores && stores.length > 0) {
+        // Enforce Meta API Rules: Max 10 rows, Title <= 24 chars, Desc <= 72 chars
+        const rows = stores.slice(0, 10).map((s, idx) => {
+          let title = String(s.store_name || s.name || `Store ${idx + 1}`).trim();
+          let description = String(s.description || 'View menu and order').trim();
+
+          if (title.length > 24) title = title.substring(0, 21) + '...';
+          if (description.length > 72) description = description.substring(0, 69) + '...';
+
+          return {
+            id: `vendor_${s.id || idx}`,
+            title: title,
+            description: description
+          };
+        });
+
+        const payload = {
+          messaging_product: 'whatsapp',
+          to: from,
+          type: 'interactive',
+          interactive: {
+            type: 'list',
+            header: { type: 'text', text: 'Select Restaurant' },
+            body: { text: 'Choose a vendor below to order food:' },
+            action: {
+              button: 'View Restaurants',
+              sections: [{ title: 'Available Vendors', rows: rows }]
             }
-          },
+          }
+        };
+
+        const response = await axios.post(
+          `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+          payload,
           {
             headers: {
               'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -83,8 +95,9 @@ app.post('/webhook', async (req, res) => {
             }
           }
         );
+        console.log('✅ Response sent successfully to WhatsApp:', response.data);
       } else {
-        // Plain text fallback if no vendors in Supabase
+        // Plain text fallback if Supabase returns 0 stores
         await axios.post(
           `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
           {
@@ -103,7 +116,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
   } catch (err) {
-    console.error('Error handling webhook:', err.response?.data || err.message);
+    console.error('❌ Error sending message:', err.response?.data || err.message);
   }
 });
 
