@@ -13,7 +13,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Webhook Verification
+// GET Webhook Verification for Meta
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -27,17 +27,29 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Helper to fetch stores safely from Supabase
+// Helper: Auto-register user in Supabase
+async function autoRegisterUser(fromPhoneNumber, profileName) {
+  try {
+    await supabase.from('customers').upsert(
+      { phone_number: fromPhoneNumber, name: profileName || 'WhatsApp User' },
+      { onConflict: 'phone_number' }
+    );
+  } catch (err) {
+    console.error('❌ User registration error:', err.message);
+  }
+}
+
+// Helper: Fetch all vendors
 async function getStores() {
   const { data, error } = await supabase.from('vendors').select('*');
   if (error) {
-    console.error('❌ Supabase fetch error:', error.message);
+    console.error('❌ Supabase vendors fetch error:', error.message);
     return [];
   }
   return data || [];
 }
 
-// Helper to send WhatsApp messages
+// Helper: Send message to WhatsApp API
 async function sendWhatsAppMessage(to, payload) {
   try {
     await axios.post(
@@ -63,18 +75,20 @@ app.post('/webhook', async (req, res) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    const value = changes?.value;
+    const message = value?.messages?.[0];
 
     if (!message) return;
 
     const from = message.from;
+    const profileName = value?.contacts?.[0]?.profile?.name;
     const text = message.text?.body ? message.text.body.trim().toLowerCase() : '';
     const selectedListId = message.interactive?.list_reply?.id;
-    const selectedButtonId = message.interactive?.button_reply?.id;
 
-    console.log(`📩 Incoming message from ${from}: "${text || selectedListId || selectedButtonId}"`);
+    // Auto-register customer details on every message
+    await autoRegisterUser(from, profileName);
 
-    // 1. Initial Greeting -> Show Main Service Menu (Food, Rides, Packages)
+    // 1. Initial Main Menu (Greeting)
     if (text === 'hi' || text === 'hello' || text === 'start' || text === 'menu') {
       const mainPayload = {
         messaging_product: 'whatsapp',
@@ -103,24 +117,20 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 2. User Clicked "Order Food" -> Fetch Vendors Dynamically from Supabase
-    if (selectedListId === 'service_food' || text.includes('food') || text.includes('order')) {
+    // 2. Clicked "Order Food" -> Fetch Vendors
+    if (selectedListId === 'service_food' || text.includes('food')) {
       const stores = await getStores();
 
       if (stores && stores.length > 0) {
-        // Enforce Meta API Rules: Max 10 rows, Title <= 24 chars, Desc <= 72 chars
         const vendorRows = stores.slice(0, 10).map((s, idx) => {
-          let rawName = s.store_name || s.name || `Store ${idx + 1}`;
-          let rawDesc = s.description || 'View menu and order food';
-
-          let title = String(rawName).trim();
-          let description = String(rawDesc).trim();
+          let title = String(s.name || s.store_name || `Store ${idx + 1}`).trim();
+          let description = String(s.description || 'View menu and order food').trim();
 
           if (title.length > 24) title = title.substring(0, 21) + '...';
           if (description.length > 72) description = description.substring(0, 69) + '...';
 
           return {
-            id: `vendor_${s.id || idx}`,
+            id: `vendor_${s.id}`,
             title: title,
             description: description
           };
@@ -133,7 +143,7 @@ app.post('/webhook', async (req, res) => {
           interactive: {
             type: 'list',
             header: { type: 'text', text: 'Select Restaurant' },
-            body: { text: 'Choose a vendor below to view menu & order:' },
+            body: { text: 'Choose a vendor below to view their menu:' },
             action: {
               button: 'View Restaurants',
               sections: [{ title: 'Available Vendors', rows: vendorRows }]
@@ -142,18 +152,68 @@ app.post('/webhook', async (req, res) => {
         };
         await sendWhatsAppMessage(from, foodPayload);
       } else {
-        // Fallback if zero stores found
         await sendWhatsAppMessage(from, {
           messaging_product: 'whatsapp',
           to: from,
           type: 'text',
-          text: { body: 'Welcome to David Delivery! No restaurants are currently available. Please check back shortly.' }
+          text: { body: 'No restaurants are currently available. Please check back shortly.' }
         });
       }
       return;
     }
 
-    // 3. User Clicked "Book a Ride"
+    // 3. Selected a Restaurant -> Fetch Menu Items for that Vendor
+    if (selectedListId && selectedListId.startsWith('vendor_')) {
+      const vendorId = selectedListId.replace('vendor_', '');
+
+      const { data: menuItems, error } = await supabase
+        .from('menu_items')
+        .select('*')
+        .eq('vendor_id', vendorId);
+
+      if (error || !menuItems || menuItems.length === 0) {
+        await sendWhatsAppMessage(from, {
+          messaging_product: 'whatsapp',
+          to: from,
+          type: 'text',
+          text: { body: 'Sorry, this restaurant has not uploaded any menu items yet.' }
+        });
+        return;
+      }
+
+      const menuRows = menuItems.slice(0, 10).map((item, idx) => {
+        let title = String(item.name || `Item ${idx + 1}`).trim();
+        let description = String(`Price: ₦${item.price || '0'}`).trim();
+
+        if (title.length > 24) title = title.substring(0, 21) + '...';
+        if (description.length > 72) description = description.substring(0, 69) + '...';
+
+        return {
+          id: `item_${item.id}`,
+          title: title,
+          description: description
+        };
+      });
+
+      const menuPayload = {
+        messaging_product: 'whatsapp',
+        to: from,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          header: { type: 'text', text: 'Restaurant Menu' },
+          body: { text: 'Select an item to place your order:' },
+          action: {
+            button: 'View Menu',
+            sections: [{ title: 'Available Food', rows: menuRows }]
+          }
+        }
+      };
+      await sendWhatsAppMessage(from, menuPayload);
+      return;
+    }
+
+    // 4. Clicked "Book a Ride"
     if (selectedListId === 'service_ride' || text.includes('ride')) {
       await sendWhatsAppMessage(from, {
         messaging_product: 'whatsapp',
@@ -164,7 +224,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 4. User Clicked "Send a Package"
+    // 5. Clicked "Send a Package"
     if (selectedListId === 'service_package' || text.includes('package')) {
       await sendWhatsAppMessage(from, {
         messaging_product: 'whatsapp',
