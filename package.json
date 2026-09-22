@@ -1,17 +1,13 @@
 {
   "name": "whatsapp-delivery-bot",
   "version": "1.0.0",
-  "description": "WhatsApp delivery bot with Supabase integration",
-  "main": "server.js",
+  "main": "whatsapp-bot-server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node whatsapp-bot-server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.6.8",
     "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
