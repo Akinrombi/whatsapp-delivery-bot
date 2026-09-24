@@ -5,31 +5,47 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-const SUPABASE_URL = 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdsa3V0ZGt3YnJqcGl1cWNtZ3dlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk5NzU3MTMsImV4cCI6MjEwNTU1MTcxM30.f2SgZJvP681imm0Qe1fKsATnCk_86z2guwvZWASXoZM';
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
+// ---------- CONFIG (all secrets come from Render environment variables) ----------
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // service_role key: server only, never in code
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
+const DELIVERY_FEE = Number(process.env.DELIVERY_FEE || 1000);
 
+if (!SUPABASE_SERVICE_KEY) console.error('❌ SUPABASE_SERVICE_KEY is missing. Add it in Render > Environment.');
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY || 'missing', {
+  auth: { persistSession: false, autoRefreshToken: false }
+});
+
+// ---------- SESSIONS (in memory) ----------
 const sessions = {};
-
 function getSession(phone) {
-  if (!sessions[phone]) {
-    sessions[phone] = { cart: [], step: 'IDLE', vendorId: null };
-  }
+  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '' };
   return sessions[phone];
 }
+function resetSession(s) { s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; }
+const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
+const naira = (n) => '₦' + Number(n).toLocaleString();
 
+// Ignore repeated webhook deliveries of the same message
+const seen = new Set();
+function alreadySeen(id) {
+  if (!id) return false;
+  if (seen.has(id)) return true;
+  seen.add(id);
+  if (seen.size > 2000) seen.delete(seen.values().next().value);
+  return false;
+}
+
+// ---------- WHATSAPP HELPERS ----------
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  if (mode && token === (process.env.VERIFY_TOKEN || 'my_verify_token')) {
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
+  if (mode && token === VERIFY_TOKEN) res.status(200).send(challenge);
+  else res.sendStatus(403);
 });
 
 async function sendWhatsAppMessage(to, payload) {
@@ -37,216 +53,262 @@ async function sendWhatsAppMessage(to, payload) {
     await axios.post(
       `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
       payload,
-      { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
     );
+    return true;
   } catch (err) {
     console.error('❌ Error sending WhatsApp message:', err.response?.data || err.message);
+    return false;
   }
 }
 
-async function sendButtonMessage(to, bodyText, buttons) {
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: to,
-    type: 'interactive',
+function sendText(to, body) {
+  return sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'text', text: { body } });
+}
+
+function sendButtonMessage(to, bodyText, buttons) {
+  return sendWhatsAppMessage(to, {
+    messaging_product: 'whatsapp', to, type: 'interactive',
     interactive: {
       type: 'button',
       body: { text: bodyText },
       action: { buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title } })) }
     }
-  };
-  await sendWhatsAppMessage(to, payload);
+  });
 }
 
-// LISTEN FOR WEBHOOK EVENTS FROM WHATSAPP
+function sendList(to, header, body, button, sectionTitle, rows) {
+  return sendWhatsAppMessage(to, {
+    messaging_product: 'whatsapp', to, type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: header },
+      body: { text: body },
+      action: { button, sections: [{ title: sectionTitle, rows }] }
+    }
+  });
+}
+
+// ---------- BOT STEPS ----------
+async function sendMainMenu(to) {
+  await sendList(to, 'David Delivery Network', 'Welcome! How can we assist you today?', 'Select Service', 'Available Services', [
+    { id: 'service_food', title: '🍔 Order Food', description: 'Order from local restaurants' },
+    { id: 'service_ride', title: '🛺 Book a Ride', description: 'Request fast transport' },
+    { id: 'service_package', title: '📦 Send a Package', description: 'Doorstep parcel delivery' }
+  ]);
+}
+
+async function sendVendorList(to) {
+  const { data: stores, error } = await supabase.from('vendors').select('id, store_name, address').eq('is_open', true).limit(10);
+  if (error) { console.error(error.message); await sendText(to, 'Sorry, something went wrong. Please try again.'); return; }
+  if (!stores || stores.length === 0) {
+    await sendText(to, 'No restaurants are currently open. Check back shortly!');
+    return;
+  }
+  const rows = stores.map((s, i) => ({
+    id: `vendor_${s.id}`,
+    title: (s.store_name || `Store ${i + 1}`).substring(0, 24),
+    description: (s.address || 'View menu & order food').substring(0, 72)
+  }));
+  await sendList(to, 'Select Restaurant', 'Choose an open restaurant:', 'View Restaurants', 'Open Stores', rows);
+}
+
+async function sendMenu(to, vendorId) {
+  const { data: items, error } = await supabase.from('menu_items').select('id, name, price')
+    .eq('vendor_id', vendorId).eq('in_stock', true).order('created_at', { ascending: true }).limit(10);
+  if (error) { console.error(error.message); await sendText(to, 'Sorry, could not load the menu.'); return; }
+  if (!items || items.length === 0) {
+    await sendText(to, 'This store has no available menu items right now. Send *menu* to pick another restaurant.');
+    return;
+  }
+  const rows = items.map((it, i) => ({
+    id: `item_${it.id}`,
+    title: (it.name || `Item ${i + 1}`).substring(0, 24),
+    description: `Price: ${naira(it.price)}`
+  }));
+  await sendList(to, 'Select Menu Items', 'Tap an item to add to your order cart:', 'Browse Menu', 'Food Items', rows);
+}
+
+function cartSummary(cart) {
+  return cart.map((i, idx) => `${idx + 1}. ${i.qty}x ${i.name} - ${naira(i.price * i.qty)}`).join('\n');
+}
+
+// ---------- WEBHOOK ----------
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
-    const entry = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
     if (!message) return;
+    if (alreadySeen(message.id)) return;
 
     const from = message.from;
+    const profileName = value?.contacts?.[0]?.profile?.name || 'WhatsApp Customer';
     const text = message.text?.body ? message.text.body.trim() : '';
     const textLower = text.toLowerCase();
-    const selectedListId = message.interactive?.list_reply?.id;
-    const selectedButtonId = message.interactive?.button_reply?.id;
+    const listId = message.interactive?.list_reply?.id;
+    const btnId = message.interactive?.button_reply?.id;
 
     const session = getSession(from);
 
-    // MAIN MENU ROUTE
-    if (textLower === 'hi' || textLower === 'hello' || textLower === 'start' || textLower === 'menu' || selectedButtonId === 'btn_cancel') {
-      session.cart = [];
-      session.step = 'IDLE';
-      session.vendorId = null;
-
-      const mainPayload = {
-        messaging_product: 'whatsapp',
-        to: from,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          header: { type: 'text', text: 'David Delivery Network' },
-          body: { text: 'Welcome! How can we assist you today?' },
-          action: {
-            button: 'Select Service',
-            sections: [{
-              title: 'Available Services',
-              rows: [
-                { id: 'service_food', title: '🍔 Order Food', description: 'Order from local restaurants' },
-                { id: 'service_ride', title: '🛺 Book a Ride', description: 'Request fast transport' },
-                { id: 'service_package', title: '📦 Send a Package', description: 'Doorstep parcel delivery' }
-              ]
-            }]
-          }
-        }
-      };
-      await sendWhatsAppMessage(from, mainPayload);
+    // MAIN MENU / CANCEL
+    if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
+      resetSession(session);
+      await sendMainMenu(from);
       return;
     }
 
-    // ORDER FOOD ROUTE
-    if (selectedListId === 'service_food' || textLower.includes('food')) {
-      const { data: stores } = await supabase.from('vendors').select('*').eq('is_open', true);
+    // DELIVERY ADDRESS STEP (checked first so an address can't trigger other routes)
+    if (session.step === 'AWAITING_LOCATION' && text && !listId && !btnId) {
+      session.address = text;
+      session.step = 'AWAITING_CONFIRM';
+      const sub = cartTotal(session.cart);
+      await sendButtonMessage(from,
+        `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(sub + DELIVERY_FEE)}*\n\n📍 ${text}\n\n💵 Pay cash or transfer to the rider on delivery.`,
+        [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
+      return;
+    }
 
-      if (stores && stores.length > 0) {
-        const rows = stores.slice(0, 10).map((s, idx) => ({
-          id: `vendor_${s.id}`,
-          title: (s.name || s.store_name || `Store ${idx + 1}`).substring(0, 24),
-          description: (s.description || 'View menu & order food').substring(0, 72)
-        }));
-
-        await sendWhatsAppMessage(from, {
-          messaging_product: 'whatsapp',
-          to: from,
-          type: 'interactive',
-          interactive: {
-            type: 'list',
-            header: { type: 'text', text: 'Select Restaurant' },
-            body: { text: 'Choose an open restaurant:' },
-            action: { button: 'View Restaurants', sections: [{ title: 'Open Stores', rows }] }
-          }
-        });
-      } else {
-        await sendWhatsAppMessage(from, { messaging_product: 'whatsapp', to: from, type: 'text', text: { body: 'No restaurants are currently open. Check back shortly!' } });
-      }
+    // SERVICES
+    if (listId === 'service_food' || textLower.includes('food')) {
+      await sendVendorList(from);
+      return;
+    }
+    if (listId === 'service_ride' || listId === 'service_package') {
+      await sendText(from, 'This service is coming soon! Send *menu* to order food in the meantime.');
       return;
     }
 
     // SELECT VENDOR
-    if (selectedListId && selectedListId.startsWith('vendor_')) {
-      const vendorId = selectedListId.replace('vendor_', '');
-      session.vendorId = vendorId;
-
-      const { data: menuItems } = await supabase.from('menu_items').select('*').eq('restaurant_id', vendorId);
-
-      if (!menuItems || menuItems.length === 0) {
-        await sendWhatsAppMessage(from, { messaging_product: 'whatsapp', to: from, type: 'text', text: { body: 'This store has no active menu items.' } });
-        return;
-      }
-
-      const rows = menuItems.slice(0, 10).map((item, idx) => ({
-        id: `item_${item.id}`,
-        title: (item.title || item.name || `Item ${idx + 1}`).substring(0, 24),
-        description: `Price: ₦${item.price || '0'}`
-      }));
-
-      await sendWhatsAppMessage(from, {
-        messaging_product: 'whatsapp',
-        to: from,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          header: { type: 'text', text: 'Select Menu Items' },
-          body: { text: 'Tap an item to add to your order cart:' },
-          action: { button: 'Browse Menu', sections: [{ title: 'Food Items', rows }] }
-        }
-      });
+    if (listId && listId.startsWith('vendor_')) {
+      const vendorId = listId.replace('vendor_', '');
+      const { data: v } = await supabase.from('vendors').select('id, store_name, is_open').eq('id', vendorId).maybeSingle();
+      if (!v || !v.is_open) { await sendText(from, 'Sorry, that restaurant is closed right now. Send *menu* to choose another.'); return; }
+      session.vendorId = v.id;
+      session.vendorName = v.store_name;
+      session.cart = [];
+      await sendMenu(from, v.id);
       return;
     }
 
     // SELECT ITEM
-    if (selectedListId && selectedListId.startsWith('item_')) {
-      const itemId = selectedListId.replace('item_', '');
-      const { data: item } = await supabase.from('menu_items').select('*').eq('id', itemId).single();
+    if (listId && listId.startsWith('item_')) {
+      if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
+      const itemId = listId.replace('item_', '');
+      const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
+      if (!item || item.vendor_id !== session.vendorId) { await sendText(from, 'That item is not available.'); return; }
+      if (!item.in_stock) { await sendText(from, `Sorry, ${item.name} is sold out. Pick something else.`); await sendMenu(from, session.vendorId); return; }
 
-      if (item) {
-        session.cart.push({ id: item.id, title: item.title || item.name, price: Number(item.price || 0) });
-        const total = session.cart.reduce((sum, i) => sum + i.price, 0);
-        const list = session.cart.map((i, idx) => `${idx + 1}. ${i.title} - ₦${i.price}`).join('\n');
+      const existing = session.cart.find(c => c.id === item.id);
+      if (existing) existing.qty += 1;
+      else session.cart.push({ id: item.id, name: item.name, price: Number(item.price), qty: 1 });
 
-        await sendButtonMessage(from, `🛒 *Item Added!*\n\n*Cart Contents:*\n${list}\n\n*Total:* ₦${total}`, [
-          { id: 'btn_add_more', title: '➕ Add More' },
-          { id: 'btn_checkout', title: '✅ Checkout' },
-          { id: 'btn_cancel', title: '❌ Cancel' }
-        ]);
-      }
+      await sendButtonMessage(from,
+        `🛒 *Item Added!*\n\n*Cart:*\n${cartSummary(session.cart)}\n\n*Food total:* ${naira(cartTotal(session.cart))}`,
+        [{ id: 'btn_add_more', title: '➕ Add More' }, { id: 'btn_checkout', title: '✅ Checkout' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
+      return;
+    }
+
+    // ADD MORE
+    if (btnId === 'btn_add_more') {
+      if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
+      await sendMenu(from, session.vendorId);
       return;
     }
 
     // CHECKOUT
-    if (selectedButtonId === 'btn_checkout') {
+    if (btnId === 'btn_checkout') {
+      if (session.cart.length === 0) { await sendText(from, 'Your cart is empty. Send *menu* to start.'); return; }
       session.step = 'AWAITING_LOCATION';
-      await sendWhatsAppMessage(from, {
-        messaging_product: 'whatsapp',
-        to: from,
-        type: 'text',
-        text: { body: '📍 *Enter Delivery Address*\n\nPlease reply with your full street address or nearby landmark.' }
-      });
+      await sendText(from, '📍 *Enter Delivery Address*\n\nPlease reply with your full street address or nearby landmark.');
       return;
     }
 
-    // SAVE ORDER & GENERATE PIN
-    if (session.step === 'AWAITING_LOCATION' && text) {
+    // CONFIRM + SAVE ORDER
+    if (btnId === 'btn_confirm') {
+      if (session.step !== 'AWAITING_CONFIRM' || session.cart.length === 0) { await sendText(from, 'Nothing to confirm. Send *menu* to start.'); return; }
+
+      const { data: v } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
+      if (!v || !v.is_open) { await sendText(from, 'Sorry, the restaurant just closed. Send *menu* to choose another.'); resetSession(session); return; }
+
       const pin = Math.floor(1000 + Math.random() * 9000).toString();
-      const total = session.cart.reduce((sum, i) => sum + i.price, 0);
+      const subtotal = cartTotal(session.cart);
+      const orderNumber = '#' + Date.now().toString().slice(-6);
 
-      await supabase.from('orders').insert([{
-        customer_phone: from,
+      const { error } = await supabase.from('orders').insert({
+        order_number: orderNumber,
         vendor_id: session.vendorId,
-        items: session.cart,
-        total_amount: total,
-        delivery_address: text,
+        customer_name: profileName,
+        customer_phone: from,
+        delivery_address: session.address,
+        items: session.cart.map(i => ({ name: i.name, qty: i.qty, price: i.price })),
+        total: subtotal,
+        delivery_fee: DELIVERY_FEE,
+        status: 'new',
         delivery_code: pin,
-        status: 'pending'
-      }]);
-
-      await sendWhatsAppMessage(from, {
-        messaging_product: 'whatsapp',
-        to: from,
-        type: 'text',
-        text: { body: `🎉 *Order Received!*\n\nTotal: ₦${total}\nAddress: ${text}\n\n🔑 *YOUR DELIVERY PIN:* *${pin}*\nGive this code to your rider upon delivery!` }
+        source: 'whatsapp'
       });
 
-      session.cart = [];
-      session.step = 'IDLE';
-      session.vendorId = null;
+      if (error) {
+        console.error('❌ Order insert failed:', error.message);
+        await sendText(from, 'Sorry, we could not place your order. Please try again.');
+        return;
+      }
+
+      await sendText(from,
+        `🎉 *Order Received!* ${orderNumber}\n\n🏪 ${session.vendorName}\nFood: ${naira(subtotal)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(subtotal + DELIVERY_FEE)}*\n📍 ${session.address}\n\n🔑 *YOUR DELIVERY PIN:* *${pin}*\nGive this code to your rider when your food arrives. We'll message you with updates.`);
+      resetSession(session);
       return;
     }
+
+    // Anything else: guide the customer
+    await sendText(from, 'Send *menu* to start an order.');
 
   } catch (err) {
     console.error('❌ Webhook error:', err.message);
   }
 });
 
-// REALTIME CUSTOMER NOTIFIER ON ORDER STATUS CHANGES
-supabase.channel('public:orders_status')
-  .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, async payload => {
-    const updatedOrder = payload.new;
-    const phone = updatedOrder.customer_phone;
-    const status = updatedOrder.status;
+// ---------- CUSTOMER STATUS UPDATES (checks the database every 6 seconds) ----------
+function statusMessage(o) {
+  const name = o.riders?.profiles?.name;
+  const rphone = o.riders?.profiles?.phone;
+  switch (o.status) {
+    case 'preparing': return `🍳 *${o.order_number}:* The restaurant accepted your order and is preparing your meal!`;
+    case 'ready_for_rider': return `📦 *${o.order_number}:* Your food is ready! We're finding a rider now.`;
+    case 'accepted': return `🛵 *${o.order_number}:* ${name ? name : 'A rider'} accepted your order${rphone ? ` (${rphone})` : ''} and is heading to the restaurant.`;
+    case 'picked_up': return `🚀 *${o.order_number}:* Your food has been picked up and is on the way!\n\n🔑 Your delivery PIN: *${o.delivery_code}*`;
+    case 'arrived_at_customer': return `📍 *${o.order_number}:* Your rider has arrived! Give them your PIN: *${o.delivery_code}*`;
+    case 'delivered': return `✅ *${o.order_number}:* Delivered! Enjoy your meal. Thank you for ordering with us. Send *menu* to order again.`;
+    case 'cancelled': return `❌ *${o.order_number}:* Sorry, your order was cancelled${o.cancel_reason ? ` (${o.cancel_reason})` : ''}. Send *menu* to order from another restaurant.`;
+    default: return '';
+  }
+}
 
-    let msg = '';
-    if (status === 'preparing') msg = `🍳 *Kitchen Update:* The restaurant has accepted your order and is preparing your meal!`;
-    if (status === 'ready') msg = `🛵 *Rider Alert:* Your food is ready! A rider is picking it up right now.`;
-    if (status === 'delivered') msg = `✅ *Order Delivered:* Enjoy your meal! Thank you for ordering with us.`;
+let notifying = false;
+async function notifyCustomers() {
+  if (notifying) return;
+  notifying = true;
+  try {
+    const { data: orders, error } = await supabase.from('orders')
+      .select('id, order_number, status, customer_phone, delivery_code, cancel_reason, riders(profiles(name, phone))')
+      .eq('source', 'whatsapp').eq('wa_pending', true).limit(20);
+    if (error) { console.error('Notifier query error:', error.message); return; }
 
-    if (msg && phone) {
-      await sendWhatsAppMessage(phone, { messaging_product: 'whatsapp', to: phone, type: 'text', text: { body: msg } });
+    for (const o of orders || []) {
+      const msg = statusMessage(o);
+      if (msg && o.customer_phone) await sendText(o.customer_phone, msg);
+      await supabase.from('orders').update({ wa_pending: false }).eq('id', o.id);
     }
-  })
-  .subscribe();
+  } catch (e) {
+    console.error('Notifier error:', e.message);
+  } finally {
+    notifying = false;
+  }
+}
+setInterval(notifyCustomers, 6000);
+
+app.get('/', (req, res) => res.send('WhatsApp delivery bot is running.'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
