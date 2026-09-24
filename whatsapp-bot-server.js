@@ -22,10 +22,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY || 'missing', {
 // ---------- SESSIONS (in memory) ----------
 const sessions = {};
 function getSession(phone) {
-  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '' };
+  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', activeItemId: null, menuPage: 0 };
   return sessions[phone];
 }
-function resetSession(s) { s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; }
+function resetSession(s) { s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; s.activeItemId = null; s.menuPage = 0; }
 const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 const naira = (n) => '₦' + Number(n).toLocaleString();
 
@@ -113,24 +113,73 @@ async function sendVendorList(to) {
   await sendList(to, 'Select Restaurant', 'Choose an open restaurant:', 'View Restaurants', 'Open Stores', rows);
 }
 
-async function sendMenu(to, vendorId) {
-  const { data: items, error } = await supabase.from('menu_items').select('id, name, price')
-    .eq('vendor_id', vendorId).eq('in_stock', true).order('created_at', { ascending: true }).limit(10);
+async function sendMenu(to, vendorId, page = 0) {
+  const { data: all, error } = await supabase.from('menu_items').select('id, name, price')
+    .eq('vendor_id', vendorId).eq('in_stock', true).order('created_at', { ascending: true }).limit(200);
   if (error) { console.error(error.message); await sendText(to, 'Sorry, could not load the menu.'); return; }
-  if (!items || items.length === 0) {
+  if (!all || all.length === 0) {
     await sendText(to, 'This store has no available menu items right now. Send *menu* to pick another restaurant.');
     return;
   }
-  const rows = items.map((it, i) => ({
+
+  // WhatsApp lists allow max 10 rows. If more items, show 8 per page with Previous/Next rows.
+  let items = all, rows = [];
+  const paged = all.length > 10;
+  const pageSize = 8;
+  if (paged) {
+    const maxPage = Math.ceil(all.length / pageSize) - 1;
+    page = Math.min(Math.max(page, 0), maxPage);
+    items = all.slice(page * pageSize, page * pageSize + pageSize);
+  }
+  rows = items.map((it, i) => ({
     id: `item_${it.id}`,
     title: (it.name || `Item ${i + 1}`).substring(0, 24),
     description: `Price: ${naira(it.price)}`
   }));
-  await sendList(to, 'Select Menu Items', 'Tap an item to add to your order cart:', 'Browse Menu', 'Food Items', rows);
+  if (paged) {
+    if (page > 0) rows.push({ id: `page_${page - 1}`, title: '◀ Previous items', description: `Page ${page} of ${Math.ceil(all.length / pageSize)}` });
+    if ((page + 1) * pageSize < all.length) rows.push({ id: `page_${page + 1}`, title: 'More items ▶', description: `Page ${page + 2} of ${Math.ceil(all.length / pageSize)}` });
+  }
+  await sendList(to, 'Select Menu Items', 'Tap an item to add it. You can add as many as you like and change quantities.', 'Browse Menu', 'Food Items', rows);
 }
 
 function cartSummary(cart) {
   return cart.map((i, idx) => `${idx + 1}. ${i.qty}x ${i.name} - ${naira(i.price * i.qty)}`).join('\n');
+}
+
+// Quantity stepper for one item: ➖ / ➕ buttons
+function sendStepper(to, session, item) {
+  return sendButtonMessage(to,
+    `🍽 *${item.name}*\nQty: *${item.qty}*  •  ${naira(item.price * item.qty)}\n\n🛒 Cart total: *${naira(cartTotal(session.cart))}*`,
+    [{ id: 'btn_minus', title: '➖ Remove 1' }, { id: 'btn_plus', title: '➕ Add 1' }, { id: 'btn_cart', title: '🛒 View Cart' }]);
+}
+
+function sendCartView(to, session) {
+  return sendButtonMessage(to,
+    `🛒 *Your Cart*\n\n${cartSummary(session.cart)}\n\n*Food total:* ${naira(cartTotal(session.cart))}\n\n_Send *menu* any time to start over._`,
+    [{ id: 'btn_add_more', title: '➕ Add Items' }, { id: 'btn_editcart', title: '✏️ Edit Cart' }, { id: 'btn_checkout', title: '✅ Checkout' }]);
+}
+
+function sendEditCartList(to, session) {
+  const rows = session.cart.slice(0, 9).map(i => ({
+    id: `cartedit_${i.id}`,
+    title: `${i.qty}x ${i.name}`.substring(0, 24),
+    description: `${naira(i.price * i.qty)} - tap to change quantity`
+  }));
+  rows.push({ id: 'cart_clear', title: '🗑 Clear cart', description: 'Remove everything and start again' });
+  return sendList(to, 'Edit Cart', 'Pick an item to change its quantity:', 'Edit Items', 'Your Items', rows);
+}
+
+async function afterQtyChange(to, session) {
+  if (session.cart.length === 0) {
+    session.activeItemId = null;
+    await sendText(to, 'Your cart is empty. Pick an item to start again.');
+    await sendMenu(to, session.vendorId, session.menuPage);
+    return;
+  }
+  const active = session.cart.find(c => c.id === session.activeItemId);
+  if (active) await sendStepper(to, session, active);
+  else await sendCartView(to, session);
 }
 
 // ---------- WEBHOOK ----------
@@ -187,32 +236,78 @@ app.post('/webhook', async (req, res) => {
       session.vendorId = v.id;
       session.vendorName = v.store_name;
       session.cart = [];
-      await sendMenu(from, v.id);
+      session.activeItemId = null;
+      session.menuPage = 0;
+      await sendMenu(from, v.id, 0);
       return;
     }
 
-    // SELECT ITEM
+    // MENU PAGINATION
+    if (listId && listId.startsWith('page_')) {
+      if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
+      session.menuPage = parseInt(listId.replace('page_', ''), 10) || 0;
+      await sendMenu(from, session.vendorId, session.menuPage);
+      return;
+    }
+
+    // SELECT ITEM (adds 1 and opens the +/- stepper)
     if (listId && listId.startsWith('item_')) {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
       const itemId = listId.replace('item_', '');
       const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
       if (!item || item.vendor_id !== session.vendorId) { await sendText(from, 'That item is not available.'); return; }
-      if (!item.in_stock) { await sendText(from, `Sorry, ${item.name} is sold out. Pick something else.`); await sendMenu(from, session.vendorId); return; }
+      if (!item.in_stock) { await sendText(from, `Sorry, ${item.name} is sold out. Pick something else.`); await sendMenu(from, session.vendorId, session.menuPage); return; }
 
-      const existing = session.cart.find(c => c.id === item.id);
-      if (existing) existing.qty += 1;
-      else session.cart.push({ id: item.id, name: item.name, price: Number(item.price), qty: 1 });
+      let entry = session.cart.find(c => c.id === item.id);
+      if (entry) entry.qty = Math.min(entry.qty + 1, 20);
+      else { entry = { id: item.id, name: item.name, price: Number(item.price), qty: 1 }; session.cart.push(entry); }
+      session.activeItemId = item.id;
+      await sendStepper(from, session, entry);
+      return;
+    }
 
-      await sendButtonMessage(from,
-        `🛒 *Item Added!*\n\n*Cart:*\n${cartSummary(session.cart)}\n\n*Food total:* ${naira(cartTotal(session.cart))}`,
-        [{ id: 'btn_add_more', title: '➕ Add More' }, { id: 'btn_checkout', title: '✅ Checkout' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
+    // + / - BUTTONS
+    if (btnId === 'btn_plus' || btnId === 'btn_minus') {
+      const entry = session.cart.find(c => c.id === session.activeItemId);
+      if (!entry) { await sendCartView(from, session); return; }
+      if (btnId === 'btn_plus') entry.qty = Math.min(entry.qty + 1, 20);
+      else {
+        entry.qty -= 1;
+        if (entry.qty <= 0) { session.cart = session.cart.filter(c => c.id !== entry.id); session.activeItemId = null; }
+      }
+      await afterQtyChange(from, session);
+      return;
+    }
+
+    // VIEW / EDIT CART
+    if (btnId === 'btn_cart') {
+      if (session.cart.length === 0) { await sendText(from, 'Your cart is empty.'); if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage); return; }
+      await sendCartView(from, session);
+      return;
+    }
+    if (btnId === 'btn_editcart') {
+      if (session.cart.length === 0) { await sendText(from, 'Your cart is empty.'); return; }
+      await sendEditCartList(from, session);
+      return;
+    }
+    if (listId && listId.startsWith('cartedit_')) {
+      const entry = session.cart.find(c => c.id === listId.replace('cartedit_', ''));
+      if (!entry) { await sendCartView(from, session); return; }
+      session.activeItemId = entry.id;
+      await sendStepper(from, session, entry);
+      return;
+    }
+    if (listId === 'cart_clear') {
+      session.cart = []; session.activeItemId = null;
+      await sendText(from, 'Cart cleared.');
+      if (session.vendorId) await sendMenu(from, session.vendorId, 0);
       return;
     }
 
     // ADD MORE
     if (btnId === 'btn_add_more') {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
-      await sendMenu(from, session.vendorId);
+      await sendMenu(from, session.vendorId, session.menuPage);
       return;
     }
 
