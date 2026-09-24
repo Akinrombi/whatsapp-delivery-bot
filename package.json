@@ -1,14 +1,725 @@
 {
-  "name": "whatsapp-delivery-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp Multi-Service Delivery Bot",
-  "main": "whatsapp-bot-server.js",
-  "scripts": {
-    "start": "node whatsapp-bot-server.js"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "axios": "^1.6.0",
-    "express": "^4.18.2"
-  }
+  "version": "5.0",
+  "screens": [
+    {
+      "id": "MENU",
+      "title": "Select Items",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "title": {
+          "type": "string",
+          "__example__": "Tasty Kitchen"
+        },
+        "i1_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i1_show": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "i2_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i2_show": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "i3_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i3_show": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "i4_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i4_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i5_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i5_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i6_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i6_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i7_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i7_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i8_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i8_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i9_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i9_show": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "i10_text": {
+          "type": "string",
+          "__example__": "Jollof Rice & Fried Chicken - N3,500"
+        },
+        "i10_show": {
+          "type": "boolean",
+          "__example__": false
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "${data.title}"
+          },
+          {
+            "type": "TextBody",
+            "text": "Choose how many of each dish you want. Leave 0 for dishes you don't want."
+          },
+          {
+            "type": "Form",
+            "name": "menu_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "${data.i1_text}",
+                "visible": "${data.i1_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q1",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i1_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i2_text}",
+                "visible": "${data.i2_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q2",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i2_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i3_text}",
+                "visible": "${data.i3_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q3",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i3_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i4_text}",
+                "visible": "${data.i4_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q4",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i4_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i5_text}",
+                "visible": "${data.i5_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q5",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i5_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i6_text}",
+                "visible": "${data.i6_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q6",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i6_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i7_text}",
+                "visible": "${data.i7_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q7",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i7_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i8_text}",
+                "visible": "${data.i8_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q8",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i8_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i9_text}",
+                "visible": "${data.i9_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q9",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i9_show}"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.i10_text}",
+                "visible": "${data.i10_show}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "q10",
+                "label": "Quantity",
+                "required": false,
+                "init-value": "0",
+                "data-source": [
+                  {
+                    "id": "0",
+                    "title": "0"
+                  },
+                  {
+                    "id": "1",
+                    "title": "1"
+                  },
+                  {
+                    "id": "2",
+                    "title": "2"
+                  },
+                  {
+                    "id": "3",
+                    "title": "3"
+                  },
+                  {
+                    "id": "4",
+                    "title": "4"
+                  },
+                  {
+                    "id": "5",
+                    "title": "5"
+                  },
+                  {
+                    "id": "6",
+                    "title": "6"
+                  },
+                  {
+                    "id": "7",
+                    "title": "7"
+                  },
+                  {
+                    "id": "8",
+                    "title": "8"
+                  },
+                  {
+                    "id": "9",
+                    "title": "9"
+                  },
+                  {
+                    "id": "10",
+                    "title": "10"
+                  }
+                ],
+                "visible": "${data.i10_show}"
+              },
+              {
+                "type": "Footer",
+                "label": "Add to Cart",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "q1": "${form.q1}",
+                    "q2": "${form.q2}",
+                    "q3": "${form.q3}",
+                    "q4": "${form.q4}",
+                    "q5": "${form.q5}",
+                    "q6": "${form.q6}",
+                    "q7": "${form.q7}",
+                    "q8": "${form.q8}",
+                    "q9": "${form.q9}",
+                    "q10": "${form.q10}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }
