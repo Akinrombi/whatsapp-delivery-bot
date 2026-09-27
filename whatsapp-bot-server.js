@@ -24,10 +24,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY || 'missing', {
 // ---------- SESSIONS ----------
 const sessions = {};
 function getSession(phone) {
-  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0 };
+  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null };
   return sessions[phone];
 }
-function resetSession(s) { s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; }
+function resetSession(s) { 
+  s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; s.note = ''; 
+  s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null;
+}
 const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 const naira = (n) => '₦' + Number(n).toLocaleString();
 
@@ -94,7 +97,7 @@ function sendList(to, header, body, button, sectionTitle, rows) {
 async function sendMainMenu(to) {
   await sendList(to, 'David Delivery Network', 'Welcome! How can we assist you today?', 'Select Service', 'Available Services', [
     { id: 'service_food', title: '🍔 Order Food', description: 'Order from local restaurants' },
-    { id: 'service_search', title: '🔍 Search', description: 'Find restaurants or dishes' }, // NEW SEARCH OPTION
+    { id: 'service_search', title: '🔍 Search', description: 'Find restaurants or dishes' }, 
     { id: 'service_ride', title: '🛺 Book a Ride', description: 'Request fast transport' },
     { id: 'service_package', title: '📦 Send a Package', description: 'Doorstep parcel delivery' }
   ]);
@@ -115,10 +118,13 @@ async function sendVendorList(to) {
   await sendList(to, 'Select Restaurant', 'Choose an open restaurant:', 'View Restaurants', 'Open Stores', rows);
 }
 
-async function sendMenuList(to, vendorId, page = 0, note = '') {
+async function sendMenuList(to, vendorId, page = 0, note = '', category = null) {
   const session = getSession(to);
-  const { data: all, error } = await supabase.from('menu_items').select('id, name, price')
-    .eq('vendor_id', vendorId).eq('in_stock', true).order('created_at', { ascending: true }).limit(200);
+  
+  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true);
+  if (category && category !== 'all') query = query.eq('category', category);
+  
+  const { data: all, error } = await query.order('created_at', { ascending: true }).limit(200);
   if (error) { console.error(error.message); await sendText(to, 'Sorry, could not load the menu.'); return; }
   if (!all || all.length === 0) {
     await sendText(to, 'This store has no available menu items right now. Send *menu* to pick another restaurant.');
@@ -149,9 +155,15 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
 
   const navRows = [{ id: 'nav_search_menu', title: '🔍 Search in Menu', description: 'Find a specific dish here' }];
   
+  // If categories exist, give them a way to go back to categories
+  if (category) {
+     navRows.push({ id: 'nav_categories', title: '📁 View Categories', description: 'Go back to categories' });
+  }
+
   if (paged) {
-    if (page > 0) navRows.push({ id: `page_${page - 1}`, title: '◀ Previous items', description: `Page ${page} of ${Math.ceil(all.length / pageSize)}` });
-    if ((page + 1) * pageSize < all.length) navRows.push({ id: `page_${page + 1}`, title: 'More items ▶', description: `Page ${page + 2} of ${Math.ceil(all.length / pageSize)}` });
+    const catParam = category ? `|${category}` : '';
+    if (page > 0) navRows.push({ id: `page_${page - 1}${catParam}`, title: '◀ Previous items', description: `Page ${page} of ${Math.ceil(all.length / pageSize)}` });
+    if ((page + 1) * pageSize < all.length) navRows.push({ id: `page_${page + 1}${catParam}`, title: 'More items ▶', description: `Page ${page + 2} of ${Math.ceil(all.length / pageSize)}` });
   }
   if (navRows.length) sections.push({ title: 'More', rows: navRows });
 
@@ -171,17 +183,20 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
     messaging_product: 'whatsapp', to, type: 'interactive',
     interactive: {
       type: 'list',
-      header: { type: 'text', text: (session.vendorName || 'Menu').substring(0, 60) },
+      header: { type: 'text', text: (session.vendorName || 'Menu').substring(0, 60) + (category && category !== 'all' ? ` - ${category}` : '') },
       body: { text: body.substring(0, 1000) },
       action: { button: 'Browse Menu', sections }
     }
   });
 }
 
-async function sendMenuFlow(to, vendorId, page = 0, note = '') {
+async function sendMenuFlow(to, vendorId, page = 0, note = '', category = null) {
   const session = getSession(to);
-  const { data: all, error } = await supabase.from('menu_items').select('id, name, price')
-    .eq('vendor_id', vendorId).eq('in_stock', true).order('created_at', { ascending: true }).limit(200);
+  
+  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true);
+  if (category && category !== 'all') query = query.eq('category', category);
+  
+  const { data: all, error } = await query.order('created_at', { ascending: true }).limit(200);
   if (error) { console.error(error.message); await sendText(to, 'Sorry, could not load the menu.'); return; }
   if (!all || all.length === 0) {
     await sendText(to, 'This store has no available menu items right now. Send *menu* to pick another restaurant.');
@@ -194,7 +209,7 @@ async function sendMenuFlow(to, vendorId, page = 0, note = '') {
   const items = all.slice(page * PER_SCREEN, page * PER_SCREEN + PER_SCREEN);
   session.flowItems = items.map(i => ({ id: i.id, name: i.name, price: Number(i.price) }));
 
-  const data = { title: (session.vendorName || 'Menu').substring(0, 60) };
+  const data = { title: (session.vendorName || 'Menu').substring(0, 60) + (category && category !== 'all' ? ` - ${category}` : '') };
   for (let n = 1; n <= PER_SCREEN; n++) {
     const it = items[n - 1];
     data[`i${n}_text`] = it ? `${it.name} - ${naira(it.price)}` : ' ';
@@ -225,12 +240,12 @@ async function sendMenuFlow(to, vendorId, page = 0, note = '') {
       }
     }
   });
-  if (!ok) { console.error('Flow send failed, falling back to list menu'); await sendMenuList(to, vendorId, 0, note); }
+  if (!ok) { console.error('Flow send failed, falling back to list menu'); await sendMenuList(to, vendorId, 0, note, category); }
 }
 
-async function sendMenu(to, vendorId, page = 0, note = '') {
-  if (FLOW_ID) return sendMenuFlow(to, vendorId, page, note);
-  return sendMenuList(to, vendorId, page, note);
+async function sendMenu(to, vendorId, page = 0, note = '', category = null) {
+  if (FLOW_ID) return sendMenuFlow(to, vendorId, page, note, category);
+  return sendMenuList(to, vendorId, page, note, category);
 }
 
 async function performGlobalSearch(to, query, session) {
@@ -306,9 +321,11 @@ app.post('/webhook', async (req, res) => {
     const textLower = text.toLowerCase();
     const listId = message.interactive?.list_reply?.id;
     const btnId = message.interactive?.button_reply?.id;
+    const location = message.location;
 
     const session = getSession(from);
 
+    // FLOW SUBMISSION
     if (message.interactive?.type === 'nfm_reply') {
       let answers = {};
       try { answers = JSON.parse(message.interactive.nfm_reply.response_json || '{}'); } catch (e) {}
@@ -332,7 +349,7 @@ app.post('/webhook', async (req, res) => {
       });
 
       if (!added.length) {
-        await sendMenu(from, session.vendorId, session.flowPage, skipped.length ? `Sorry, sold out: ${skipped.join(', ')}.` : 'You did not choose any dish.');
+        await sendMenu(from, session.vendorId, session.flowPage, skipped.length ? `Sorry, sold out: ${skipped.join(', ')}.` : 'You did not choose any dish.', session.lastCategory);
         return;
       }
       let note = `✅ *Added to cart:*\n${added.join('\n')}`;
@@ -341,22 +358,116 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // MAIN MENU / CANCEL
     if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
       resetSession(session);
-      await sendMainMenu(from);
-      return;
+      
+      // NEW: ORDER AGAIN FEATURE
+      const { data: lastOrder } = await supabase.from('orders').select('*').eq('customer_phone', from).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      if (lastOrder && lastOrder.items && lastOrder.items.length > 0) {
+         session.tempLastOrder = lastOrder;
+         await sendButtonMessage(from, 'Welcome back! Would you like to order your usual again?', [
+           { id: 'btn_reorder', title: '🔄 Order Again' },
+           { id: 'btn_browse', title: '📋 Browse Menu' }
+         ]);
+         return;
+      } else {
+         await sendMainMenu(from);
+         return;
+      }
     }
 
-    if (session.step === 'AWAITING_LOCATION' && text && !listId && !btnId) {
-      session.address = text;
-      session.step = 'AWAITING_CONFIRM';
-      const sub = cartTotal(session.cart);
-      await sendButtonMessage(from,
-        `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(sub + DELIVERY_FEE)}*\n\n📍 ${text}\n\n💵 Pay cash or transfer to the rider on delivery.`,
-        [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
-      return;
+    if (btnId === 'btn_browse') {
+       await sendMainMenu(from);
+       return;
     }
 
+    if (btnId === 'btn_reorder') {
+       const lastOrder = session.tempLastOrder;
+       if (!lastOrder) { await sendMainMenu(from); return; }
+       
+       const { data: v } = await supabase.from('vendors').select('id, store_name, is_open').eq('id', lastOrder.vendor_id).maybeSingle();
+       if (!v || !v.is_open) { await sendText(from, 'Sorry, that restaurant is currently closed. Send *menu* to choose another.'); return; }
+       
+       session.vendorId = v.id;
+       session.vendorName = v.store_name;
+       
+       // Re-verify prices and availability from DB
+       const itemIds = lastOrder.items.map(i => i.id).filter(id => id);
+       if (itemIds.length > 0) {
+          const { data: freshItems } = await supabase.from('menu_items').select('id, name, price, in_stock').in('id', itemIds);
+          const freshMap = {};
+          (freshItems || []).forEach(f => { freshMap[f.id] = f; });
+          
+          session.cart = lastOrder.items.map(i => {
+             const f = freshMap[i.id];
+             if (f && f.in_stock) return { id: f.id, name: f.name, price: Number(f.price), qty: i.qty };
+             return null;
+          }).filter(i => i !== null);
+       } else {
+          session.cart = []; // Old order without IDs, cannot reliably reorder
+          await sendText(from, 'Your previous order is too old to reorder automatically. Please browse the menu.');
+          await sendMenu(from, v.id, 0);
+          return;
+       }
+
+       if (session.cart.length === 0) {
+          await sendText(from, 'None of your previous items are currently available. Please browse the menu.');
+          await sendMenu(from, v.id, 0);
+          return;
+       }
+
+       await sendCartView(from, session, 'Here is your previous order (updated with current prices):');
+       return;
+    }
+
+    // LOCATION PIN HANDLING
+    if (session.step === 'AWAITING_LOCATION') {
+      if (location) {
+         session.address = `Lat: ${location.latitude}, Long: ${location.longitude}`;
+         session.step = 'AWAITING_NOTE_PROMPT';
+         await sendButtonMessage(from, '📍 Location pin received! Do you have any special instructions for the restaurant?', [
+            { id: 'btn_add_note', title: '📝 Add Note' },
+            { id: 'btn_skip_note', title: '⏭️ Skip' }
+         ]);
+         return;
+      } else if (text && !listId && !btnId) {
+         session.address = text;
+         session.step = 'AWAITING_NOTE_PROMPT';
+         await sendButtonMessage(from, '📍 Address received! Do you have any special instructions for the restaurant?', [
+            { id: 'btn_add_note', title: '📝 Add Note' },
+            { id: 'btn_skip_note', title: '⏭️ Skip' }
+         ]);
+         return;
+      }
+    }
+
+    // NOTE HANDLING
+    if (btnId === 'btn_add_note') {
+       session.step = 'AWAITING_NOTE';
+       await sendText(from, 'Please type your special instructions (e.g., Extra pepper, no onions, call on arrival):');
+       return;
+    }
+    if (btnId === 'btn_skip_note') {
+       session.note = '';
+       session.step = 'AWAITING_CONFIRM';
+       const sub = cartTotal(session.cart);
+       await sendButtonMessage(from,
+         `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(sub + DELIVERY_FEE)}*\n\n📍 ${session.address}\n\n💵 Pay cash or transfer to the rider on delivery.`,
+         [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
+       return;
+    }
+    if (session.step === 'AWAITING_NOTE' && text && !listId && !btnId) {
+       session.note = text;
+       session.step = 'AWAITING_CONFIRM';
+       const sub = cartTotal(session.cart);
+       await sendButtonMessage(from,
+         `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(sub + DELIVERY_FEE)}*\n\n📍 ${session.address}\n📝 Note: ${text}\n\n💵 Pay cash or transfer to the rider on delivery.`,
+         [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
+       return;
+    }
+
+    // SEARCH STEPS
     if (session.step === 'AWAITING_GLOBAL_SEARCH' && text && !listId && !btnId) {
       session.step = 'IDLE';
       await performGlobalSearch(from, text, session);
@@ -384,6 +495,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // SERVICES
     if (listId === 'service_food' || textLower.includes('food')) {
       await sendVendorList(from);
       return;
@@ -413,6 +525,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // SELECT VENDOR & CATEGORIES
     if (listId && listId.startsWith('vendor_')) {
       const vendorId = listId.replace('vendor_', '');
       const { data: v } = await supabase.from('vendors').select('id, store_name, is_open').eq('id', vendorId).maybeSingle();
@@ -422,17 +535,51 @@ app.post('/webhook', async (req, res) => {
       session.cart = [];
       session.activeItemId = null;
       session.menuPage = 0;
-      await sendMenu(from, v.id, 0);
-      return;
+      session.lastCategory = null;
+
+      // NEW: Check for categories
+      const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', vendorId).eq('in_stock', true).not('category', 'is', null);
+      const uniqueCats = [...new Set((cats || []).map(c => c.category))].filter(c => c && c.trim() !== '');
+
+      if (uniqueCats.length > 0) {
+         const catRows = uniqueCats.map(c => ({ id: `cat_${c}`, title: c.substring(0, 24), description: `View ${c}` }));
+         catRows.push({ id: 'cat_all', title: '📋 View All Items', description: 'See the entire menu' });
+         await sendList(from, 'Menu Categories', 'Select a category:', 'View Categories', 'Categories', catRows);
+         return;
+      } else {
+         await sendMenu(from, vendorId, 0);
+         return;
+      }
     }
 
+    if (listId && listId.startsWith('cat_')) {
+       const cat = listId.replace('cat_', '');
+       session.lastCategory = cat;
+       await sendMenu(from, session.vendorId, 0, '', cat);
+       return;
+    }
+
+    if (listId === 'nav_categories') {
+       if (!session.vendorId) return;
+       const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', session.vendorId).eq('in_stock', true).not('category', 'is', null);
+       const uniqueCats = [...new Set((cats || []).map(c => c.category))].filter(c => c && c.trim() !== '');
+       const catRows = uniqueCats.map(c => ({ id: `cat_${c}`, title: c.substring(0, 24), description: `View ${c}` }));
+       catRows.push({ id: 'cat_all', title: '📋 View All Items', description: 'See the entire menu' });
+       await sendList(from, 'Menu Categories', 'Select a category:', 'View Categories', 'Categories', catRows);
+       return;
+    }
+
+    // MENU PAGINATION (Handles Category state)
     if (listId && listId.startsWith('page_')) {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
-      session.menuPage = parseInt(listId.replace('page_', ''), 10) || 0;
-      await sendMenu(from, session.vendorId, session.menuPage);
+      const parts = listId.replace('page_', '').split('|');
+      session.menuPage = parseInt(parts[0], 10) || 0;
+      const cat = parts[1] || null;
+      await sendMenu(from, session.vendorId, session.menuPage, '', cat);
       return;
     }
 
+    // SELECT ITEM
     if (listId && listId.startsWith('item_')) {
       const itemId = listId.replace('item_', '');
       const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
@@ -448,54 +595,70 @@ app.post('/webhook', async (req, res) => {
         session.vendorName = v ? v.store_name : 'Restaurant';
       }
 
-      if (!item.in_stock) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is sold out.`); return; }
+      if (!item.in_stock) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is sold out.`, session.lastCategory); return; }
 
       let entry = session.cart.find(c => c.id === item.id);
       if (entry) entry.qty = Math.min(entry.qty + 1, 20);
       else { entry = { id: item.id, name: item.name, price: Number(item.price), qty: 1 }; session.cart.push(entry); }
-      await sendMenu(from, session.vendorId, session.menuPage, `✅ Added *${item.name}* (x${entry.qty})`);
+      await sendMenu(from, session.vendorId, session.menuPage, `✅ Added *${item.name}* (x${entry.qty})`, session.lastCategory);
       return;
     }
 
+    // CART ROWS
     if (listId === 'nav_cart' || btnId === 'btn_cart') {
-      if (session.cart.length === 0) { if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage, 'Your cart is empty.'); return; }
+      if (session.cart.length === 0) { if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage, 'Your cart is empty.', session.lastCategory); return; }
       await sendCartView(from, session);
       return;
     }
     if (listId === 'nav_remove' || btnId === 'btn_editcart') {
-      if (session.cart.length === 0) { if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage, 'Your cart is empty.'); return; }
+      if (session.cart.length === 0) { if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage, 'Your cart is empty.', session.lastCategory); return; }
       await sendEditCartList(from, session);
       return;
     }
     if (listId && listId.startsWith('cartrm_')) {
       const entry = session.cart.find(c => c.id === listId.replace('cartrm_', ''));
-      if (!entry) { await sendMenu(from, session.vendorId, session.menuPage); return; }
+      if (!entry) { await sendMenu(from, session.vendorId, session.menuPage, '', session.lastCategory); return; }
       entry.qty -= 1;
       if (entry.qty <= 0) session.cart = session.cart.filter(c => c.id !== entry.id);
       const rmNote = `➖ Removed 1 *${entry.name}*${entry.qty > 0 ? ` (x${entry.qty} left)` : ' (removed from cart)'}`;
       if (FLOW_ID && session.cart.length) await sendCartView(from, session, rmNote);
-      else await sendMenu(from, session.vendorId, session.menuPage, rmNote);
+      else await sendMenu(from, session.vendorId, session.menuPage, rmNote, session.lastCategory);
       return;
     }
     if (listId === 'cart_clear') {
       session.cart = [];
-      if (session.vendorId) await sendMenu(from, session.vendorId, 0, 'Cart cleared.');
+      if (session.vendorId) await sendMenu(from, session.vendorId, 0, 'Cart cleared.', session.lastCategory);
       return;
     }
 
+    // ADD MORE
     if (btnId === 'btn_add_more') {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
-      await sendMenu(from, session.vendorId, FLOW_ID ? session.flowPage + 1 : session.menuPage);
+      await sendMenu(from, session.vendorId, FLOW_ID ? session.flowPage + 1 : session.menuPage, '', session.lastCategory);
       return;
     }
 
+    // CHECKOUT
     if (btnId === 'btn_checkout') {
       if (session.cart.length === 0) { await sendText(from, 'Your cart is empty. Send *menu* to start.'); return; }
       session.step = 'AWAITING_LOCATION';
-      await sendText(from, '📍 *Enter Delivery Address*\n\nPlease reply with your full street address or nearby landmark.');
+      await sendButtonMessage(from, '📍 *Enter Delivery Address*\n\nPlease share your location pin or type your full street address.', [
+         { id: 'btn_share_loc', title: '📍 Share Location' },
+         { id: 'btn_type_addr', title: '⌨️ Type Address' }
+      ]);
       return;
     }
 
+    if (btnId === 'btn_share_loc') {
+       await sendText(from, 'Please tap the attachment icon (📎) and select *Location* to send your pin.');
+       return;
+    }
+    if (btnId === 'btn_type_addr') {
+       await sendText(from, 'Please reply with your full street address or nearby landmark.');
+       return;
+    }
+
+    // CONFIRM + SAVE ORDER
     if (btnId === 'btn_confirm') {
       if (session.step !== 'AWAITING_CONFIRM' || session.cart.length === 0) { await sendText(from, 'Nothing to confirm. Send *menu* to start.'); return; }
 
@@ -506,13 +669,15 @@ app.post('/webhook', async (req, res) => {
       const subtotal = cartTotal(session.cart);
       const orderNumber = '#' + Date.now().toString().slice(-6);
 
+      // Notice we are now saving item IDs to the order so Reorder works
       const { error } = await supabase.from('orders').insert({
         order_number: orderNumber,
         vendor_id: session.vendorId,
         customer_name: profileName,
         customer_phone: from,
         delivery_address: session.address,
-        items: session.cart.map(i => ({ name: i.name, qty: i.qty, price: i.price })),
+        notes: session.note || null,
+        items: session.cart.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })),
         total: subtotal,
         delivery_fee: DELIVERY_FEE,
         status: 'new',
@@ -527,7 +692,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       await sendText(from,
-        `🎉 *Order Received!* ${orderNumber}\n\n🏪 ${session.vendorName}\nFood: ${naira(subtotal)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(subtotal + DELIVERY_FEE)}*\n📍 ${session.address}\n\n🔑 *YOUR DELIVERY PIN:* *${pin}*\nGive this code to your rider when your food arrives. We'll message you with updates.`);
+        `🎉 *Order Received!* ${orderNumber}\n\n🏪 ${session.vendorName}\nFood: ${naira(subtotal)}\nDelivery: ${naira(DELIVERY_FEE)}\n*Total: ${naira(subtotal + DELIVERY_FEE)}*\n📍 ${session.address}${session.note ? `\n📝 Note: ${session.note}` : ''}\n\n🔑 *YOUR DELIVERY PIN:* *${pin}*\nGive this code to your rider when your food arrives. We'll message you with updates.`);
       resetSession(session);
       return;
     }
