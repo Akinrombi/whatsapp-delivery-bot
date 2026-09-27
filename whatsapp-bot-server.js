@@ -95,6 +95,7 @@ function sendList(to, header, body, button, sectionTitle, rows) {
 async function sendMainMenu(to) {
   await sendList(to, 'David Delivery Network', 'Welcome! How can we assist you today?', 'Select Service', 'Available Services', [
     { id: 'service_food', title: '🍔 Order Food', description: 'Order from local restaurants' },
+    { id: 'service_search', title: '🔍 Search', description: 'Find restaurants or dishes' }, // NEW SEARCH OPTION
     { id: 'service_ride', title: '🛺 Book a Ride', description: 'Request fast transport' },
     { id: 'service_package', title: '📦 Send a Package', description: 'Doorstep parcel delivery' }
   ]);
@@ -148,12 +149,14 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
   });
   const sections = [{ title: 'Food Items', rows: itemRows }];
 
+  // --- NEW: Add Search in Menu option ---
+  const navRows = [{ id: 'nav_search_menu', title: '🔍 Search in Menu', description: 'Find a specific dish here' }];
+  
   if (paged) {
-    const navRows = [];
     if (page > 0) navRows.push({ id: `page_${page - 1}`, title: '◀ Previous items', description: `Page ${page} of ${Math.ceil(all.length / pageSize)}` });
     if ((page + 1) * pageSize < all.length) navRows.push({ id: `page_${page + 1}`, title: 'More items ▶', description: `Page ${page + 2} of ${Math.ceil(all.length / pageSize)}` });
-    if (navRows.length) sections.push({ title: 'More', rows: navRows });
   }
+  if (navRows.length) sections.push({ title: 'More', rows: navRows });
 
   if (session.cart.length) {
     const count = session.cart.reduce((n, c) => n + c.qty, 0);
@@ -233,6 +236,46 @@ async function sendMenuFlow(to, vendorId, page = 0, note = '') {
 async function sendMenu(to, vendorId, page = 0, note = '') {
   if (FLOW_ID) return sendMenuFlow(to, vendorId, page, note);
   return sendMenuList(to, vendorId, page, note);
+}
+
+// --- NEW: Global Search Function ---
+async function performGlobalSearch(to, query, session) {
+  if (!query || query.trim().length < 2) {
+    await sendText(to, 'Please enter a longer search term (at least 2 characters).');
+    return;
+  }
+  const q = `%${query.trim()}%`;
+  
+  const [vRes, iRes] = await Promise.all([
+    supabase.from('vendors').select('id, store_name, address').ilike('store_name', q).eq('is_open', true).limit(6),
+    supabase.from('menu_items').select('id, name, price, vendor_id, vendors(store_name)').ilike('name', q).eq('in_stock', true).limit(6)
+  ]);
+
+  const vendors = vRes.data || [];
+  const items = iRes.data || [];
+
+  if (vendors.length === 0 && items.length === 0) {
+    await sendText(to, `❌ No results found for "*${query}*".\n\nTry a different word, or send *menu* to browse manually.`);
+    return;
+  }
+
+  const rows = [];
+  vendors.forEach(v => {
+    rows.push({ id: `vendor_${v.id}`, title: `🏪 ${v.store_name}`.substring(0, 24), description: (v.address || 'View menu').substring(0, 72) });
+  });
+  items.forEach(it => {
+    const vendorName = it.vendors ? it.vendors.store_name : 'Restaurant';
+    rows.push({ id: `item_${it.id}`, title: `🍽️ ${it.name} - ${naira(it.price)}`.substring(0, 24), description: `From: ${vendorName}`.substring(0, 72) });
+  });
+
+  // WhatsApp List limit is 10 rows total
+  const limitedRows = rows.slice(0, 10);
+  const extraCount = rows.length - 10;
+
+  let body = `🔍 *Search Results for "${query}"*\n\nTap an item to view or add to cart.`;
+  if (extraCount > 0) body += `\n\n_Showing top 10 results. Refine your search for more specific items._`;
+
+  await sendList(to, 'Search Results', body, 'View Results', 'Matches', limitedRows);
 }
 
 function cartSummary(cart) {
@@ -324,11 +367,61 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // --- NEW: SEARCH STEPS ---
+    if (session.step === 'AWAITING_GLOBAL_SEARCH' && text && !listId && !btnId) {
+      session.step = 'IDLE';
+      await performGlobalSearch(from, text, session);
+      return;
+    }
+
+    if (session.step === 'AWAITING_MENU_SEARCH' && text && !listId && !btnId) {
+      if (!session.vendorId) { await sendText(from, 'Session expired. Send *menu*.'); return; }
+      session.step = 'IDLE';
+      const q = `%${text.trim()}%`;
+      const { data: items } = await supabase.from('menu_items').select('id, name, price').ilike('name', q).eq('vendor_id', session.vendorId).eq('in_stock', true).limit(10);
+
+      if (!items || items.length === 0) {
+        await sendText(from, `❌ No dishes found matching "*${text}*" in this restaurant.`);
+        return;
+      }
+
+      const rows = items.map(it => ({
+        id: `item_${it.id}`,
+        title: `${it.name} - ${naira(it.price)}`.substring(0, 24),
+        description: 'Tap to add to cart'
+      }));
+
+      await sendList(from, 'Search Results', `Found ${items.length} match(es) for "${text}"`, 'View Items', 'Matches', rows);
+      return;
+    }
+
     // SERVICES
     if (listId === 'service_food' || textLower.includes('food')) {
       await sendVendorList(from);
       return;
     }
+
+    if (listId === 'service_search' || textLower.startsWith('search ') || textLower.startsWith('find ')) {
+      let query = '';
+      if (listId === 'service_search') {
+        session.step = 'AWAITING_GLOBAL_SEARCH';
+        await sendText(from, '🔍 *What are you looking for?*\n\nReply with a restaurant name or a dish (e.g., "Suya" or "First Stop").');
+        return;
+      } else {
+        // User typed "search xxx" directly
+        query = text.replace(/^(search|find)\s+/i, '');
+        await performGlobalSearch(from, query, session);
+        return;
+      }
+    }
+
+    if (listId === 'nav_search_menu') {
+      session.step = 'AWAITING_MENU_SEARCH';
+      await sendText(from, '🔍 *Search this Menu*\n\nPlease reply with the name of the dish you are looking for (e.g., "Jollof" or "Suya").');
+      return;
+    }
+    // --- END NEW SEARCH STEPS ---
+
     if (listId === 'service_ride' || listId === 'service_package') {
       await sendText(from, 'This service is coming soon! Send *menu* to order food in the meantime.');
       return;
@@ -358,10 +451,22 @@ app.post('/webhook', async (req, res) => {
 
     // SELECT ITEM (+1 each tap, then the menu list comes back with updated quantities)
     if (listId && listId.startsWith('item_')) {
-      if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
       const itemId = listId.replace('item_', '');
       const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
-      if (!item || item.vendor_id !== session.vendorId) { await sendText(from, 'That item is not available.'); return; }
+      if (!item) { await sendText(from, 'That item is not available.'); return; }
+      
+      // NEW: Handle global search item click - if no vendor selected or switching vendors
+      if (!session.vendorId || session.vendorId !== item.vendor_id) {
+        if (session.cart.length > 0) {
+           session.cart = []; // Clear cart if switching vendors implicitly
+           await sendText(from, '🔄 We cleared your previous cart because you selected an item from a different restaurant.');
+        }
+        session.vendorId = item.vendor_id;
+        const { data: v } = await supabase.from('vendors').select('store_name').eq('id', item.vendor_id).maybeSingle();
+        session.vendorName = v ? v.store_name : 'Restaurant';
+      }
+      // END NEW
+
       if (!item.in_stock) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is sold out.`); return; }
 
       let entry = session.cart.find(c => c.id === item.id);
