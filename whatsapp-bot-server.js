@@ -5,23 +5,23 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-// ---------- CONFIG (all secrets come from Render environment variables) ----------
+// ---------- CONFIG ----------
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // service_role key: server only, never in code
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
 const DELIVERY_FEE = Number(process.env.DELIVERY_FEE || 1000);
-const FLOW_ID = process.env.FLOW_ID || '';            // WhatsApp Flow with quantity dropdowns (optional)
-const FLOW_MODE = process.env.FLOW_MODE || 'published'; // use 'draft' while testing an unpublished flow
+const FLOW_ID = process.env.FLOW_ID || '';            
+const FLOW_MODE = process.env.FLOW_MODE || 'published'; 
 
-if (!SUPABASE_SERVICE_KEY) console.error('❌ SUPABASE_SERVICE_KEY is missing. Add it in Render > Environment.');
+if (!SUPABASE_SERVICE_KEY) console.error('❌ SUPABASE_SERVICE_KEY is missing.');
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY || 'missing', {
   auth: { persistSession: false, autoRefreshToken: false }
 });
 
-// ---------- SESSIONS (in memory) ----------
+// ---------- SESSIONS ----------
 const sessions = {};
 function getSession(phone) {
   if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0 };
@@ -31,7 +31,6 @@ function resetSession(s) { s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.ve
 const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 const naira = (n) => '₦' + Number(n).toLocaleString();
 
-// Ignore repeated webhook deliveries of the same message
 const seen = new Set();
 function alreadySeen(id) {
   if (!id) return false;
@@ -126,7 +125,6 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
     return;
   }
 
-  // WhatsApp lists allow max 10 rows in total (items + navigation + cart rows)
   const cartRowCount = session.cart.length ? 2 : 0;
   const paged = all.length > 10 - cartRowCount;
   const pageSize = 6;
@@ -149,7 +147,6 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
   });
   const sections = [{ title: 'Food Items', rows: itemRows }];
 
-  // --- NEW: Add Search in Menu option ---
   const navRows = [{ id: 'nav_search_menu', title: '🔍 Search in Menu', description: 'Find a specific dish here' }];
   
   if (paged) {
@@ -181,7 +178,6 @@ async function sendMenuList(to, vendorId, page = 0, note = '') {
   });
 }
 
-// ---- WhatsApp Flow menu: real multi-select with a quantity dropdown per dish ----
 async function sendMenuFlow(to, vendorId, page = 0, note = '') {
   const session = getSession(to);
   const { data: all, error } = await supabase.from('menu_items').select('id, name, price')
@@ -232,13 +228,11 @@ async function sendMenuFlow(to, vendorId, page = 0, note = '') {
   if (!ok) { console.error('Flow send failed, falling back to list menu'); await sendMenuList(to, vendorId, 0, note); }
 }
 
-// Uses the Flow when FLOW_ID is set, otherwise the plain list menu
 async function sendMenu(to, vendorId, page = 0, note = '') {
   if (FLOW_ID) return sendMenuFlow(to, vendorId, page, note);
   return sendMenuList(to, vendorId, page, note);
 }
 
-// --- NEW: Global Search Function ---
 async function performGlobalSearch(to, query, session) {
   if (!query || query.trim().length < 2) {
     await sendText(to, 'Please enter a longer search term (at least 2 characters).');
@@ -268,7 +262,6 @@ async function performGlobalSearch(to, query, session) {
     rows.push({ id: `item_${it.id}`, title: `🍽️ ${it.name} - ${naira(it.price)}`.substring(0, 24), description: `From: ${vendorName}`.substring(0, 72) });
   });
 
-  // WhatsApp List limit is 10 rows total
   const limitedRows = rows.slice(0, 10);
   const extraCount = rows.length - 10;
 
@@ -316,7 +309,6 @@ app.post('/webhook', async (req, res) => {
 
     const session = getSession(from);
 
-    // FLOW SUBMISSION (customer chose dishes + quantities in the Flow)
     if (message.interactive?.type === 'nfm_reply') {
       let answers = {};
       try { answers = JSON.parse(message.interactive.nfm_reply.response_json || '{}'); } catch (e) {}
@@ -349,14 +341,12 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // MAIN MENU / CANCEL
     if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
       resetSession(session);
       await sendMainMenu(from);
       return;
     }
 
-    // DELIVERY ADDRESS STEP (checked first so an address can't trigger other routes)
     if (session.step === 'AWAITING_LOCATION' && text && !listId && !btnId) {
       session.address = text;
       session.step = 'AWAITING_CONFIRM';
@@ -367,7 +357,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // --- NEW: SEARCH STEPS ---
     if (session.step === 'AWAITING_GLOBAL_SEARCH' && text && !listId && !btnId) {
       session.step = 'IDLE';
       await performGlobalSearch(from, text, session);
@@ -395,7 +384,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // SERVICES
     if (listId === 'service_food' || textLower.includes('food')) {
       await sendVendorList(from);
       return;
@@ -408,7 +396,6 @@ app.post('/webhook', async (req, res) => {
         await sendText(from, '🔍 *What are you looking for?*\n\nReply with a restaurant name or a dish (e.g., "Suya" or "First Stop").');
         return;
       } else {
-        // User typed "search xxx" directly
         query = text.replace(/^(search|find)\s+/i, '');
         await performGlobalSearch(from, query, session);
         return;
@@ -420,14 +407,12 @@ app.post('/webhook', async (req, res) => {
       await sendText(from, '🔍 *Search this Menu*\n\nPlease reply with the name of the dish you are looking for (e.g., "Jollof" or "Suya").');
       return;
     }
-    // --- END NEW SEARCH STEPS ---
 
     if (listId === 'service_ride' || listId === 'service_package') {
       await sendText(from, 'This service is coming soon! Send *menu* to order food in the meantime.');
       return;
     }
 
-    // SELECT VENDOR
     if (listId && listId.startsWith('vendor_')) {
       const vendorId = listId.replace('vendor_', '');
       const { data: v } = await supabase.from('vendors').select('id, store_name, is_open').eq('id', vendorId).maybeSingle();
@@ -441,7 +426,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // MENU PAGINATION
     if (listId && listId.startsWith('page_')) {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
       session.menuPage = parseInt(listId.replace('page_', ''), 10) || 0;
@@ -449,23 +433,20 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // SELECT ITEM (+1 each tap, then the menu list comes back with updated quantities)
     if (listId && listId.startsWith('item_')) {
       const itemId = listId.replace('item_', '');
       const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
       if (!item) { await sendText(from, 'That item is not available.'); return; }
       
-      // NEW: Handle global search item click - if no vendor selected or switching vendors
       if (!session.vendorId || session.vendorId !== item.vendor_id) {
         if (session.cart.length > 0) {
-           session.cart = []; // Clear cart if switching vendors implicitly
+           session.cart = []; 
            await sendText(from, '🔄 We cleared your previous cart because you selected an item from a different restaurant.');
         }
         session.vendorId = item.vendor_id;
         const { data: v } = await supabase.from('vendors').select('store_name').eq('id', item.vendor_id).maybeSingle();
         session.vendorName = v ? v.store_name : 'Restaurant';
       }
-      // END NEW
 
       if (!item.in_stock) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is sold out.`); return; }
 
@@ -476,7 +457,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // CART ROWS INSIDE THE MENU LIST
     if (listId === 'nav_cart' || btnId === 'btn_cart') {
       if (session.cart.length === 0) { if (session.vendorId) await sendMenu(from, session.vendorId, session.menuPage, 'Your cart is empty.'); return; }
       await sendCartView(from, session);
@@ -503,14 +483,12 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ADD MORE
     if (btnId === 'btn_add_more') {
       if (!session.vendorId) { await sendText(from, 'Please start again. Send *menu*.'); return; }
       await sendMenu(from, session.vendorId, FLOW_ID ? session.flowPage + 1 : session.menuPage);
       return;
     }
 
-    // CHECKOUT
     if (btnId === 'btn_checkout') {
       if (session.cart.length === 0) { await sendText(from, 'Your cart is empty. Send *menu* to start.'); return; }
       session.step = 'AWAITING_LOCATION';
@@ -518,7 +496,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // CONFIRM + SAVE ORDER
     if (btnId === 'btn_confirm') {
       if (session.step !== 'AWAITING_CONFIRM' || session.cart.length === 0) { await sendText(from, 'Nothing to confirm. Send *menu* to start.'); return; }
 
@@ -555,7 +532,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // Anything else: guide the customer
     await sendText(from, 'Send *menu* to start an order.');
 
   } catch (err) {
@@ -563,7 +539,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- CUSTOMER STATUS UPDATES (checks the database every 6 seconds) ----------
+// ---------- CUSTOMER STATUS UPDATES ----------
 function statusMessage(o) {
   const name = o.riders?.profiles?.name;
   const rphone = o.riders?.profiles?.phone;
