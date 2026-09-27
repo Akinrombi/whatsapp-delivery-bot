@@ -103,19 +103,40 @@ async function sendMainMenu(to) {
   ]);
 }
 
-async function sendVendorList(to) {
-  const { data: stores, error } = await supabase.from('vendors').select('id, store_name, address').eq('is_open', true).limit(10);
+async function sendVendorList(to, page = 0, note = '') {
+  const PAGE_SIZE = 6; 
+  const start = page * PAGE_SIZE;
+  
+  const { count: totalCount } = await supabase.from('vendors').select('*', { count: 'exact', head: true }).eq('is_open', true);
+  
+  const { data: stores, error } = await supabase.from('vendors')
+    .select('id, store_name, address')
+    .eq('is_open', true)
+    .order('store_name', { ascending: true })
+    .range(start, start + PAGE_SIZE - 1);
+
   if (error) { console.error(error.message); await sendText(to, 'Sorry, something went wrong. Please try again.'); return; }
   if (!stores || stores.length === 0) {
     await sendText(to, 'No restaurants are currently open. Check back shortly!');
     return;
   }
+
   const rows = stores.map((s, i) => ({
     id: `vendor_${s.id}`,
     title: (s.store_name || `Store ${i + 1}`).substring(0, 24),
     description: (s.address || 'View menu & order food').substring(0, 72)
   }));
-  await sendList(to, 'Select Restaurant', 'Choose an open restaurant:', 'View Restaurants', 'Open Stores', rows);
+
+  const totalPages = Math.ceil((totalCount || 0) / PAGE_SIZE);
+  if (totalPages > 1) {
+    if (page > 0) rows.push({ id: `vendor_prev_${page - 1}`, title: '◀ Previous Restaurants', description: `Page ${page} of ${totalPages}` });
+    if (page + 1 < totalPages) rows.push({ id: `vendor_next_${page + 1}`, title: 'More Restaurants ▶', description: `Page ${page + 2} of ${totalPages}` });
+  }
+
+  let body = note ? `${note}\n\n` : 'Choose an open restaurant:';
+  if (totalPages > 1) body += `\n\nShowing page ${page + 1} of ${totalPages}`;
+
+  await sendList(to, 'Select Restaurant', body, 'View Restaurants', 'Open Stores', rows);
 }
 
 async function sendMenuList(to, vendorId, page = 0, note = '', category = null) {
@@ -155,7 +176,6 @@ async function sendMenuList(to, vendorId, page = 0, note = '', category = null) 
 
   const navRows = [{ id: 'nav_search_menu', title: '🔍 Search in Menu', description: 'Find a specific dish here' }];
   
-  // If categories exist, give them a way to go back to categories
   if (category) {
      navRows.push({ id: 'nav_categories', title: '📁 View Categories', description: 'Go back to categories' });
   }
@@ -362,7 +382,6 @@ app.post('/webhook', async (req, res) => {
     if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
       resetSession(session);
       
-      // NEW: ORDER AGAIN FEATURE
       const { data: lastOrder } = await supabase.from('orders').select('*').eq('customer_phone', from).order('created_at', { ascending: false }).limit(1).maybeSingle();
       if (lastOrder && lastOrder.items && lastOrder.items.length > 0) {
          session.tempLastOrder = lastOrder;
@@ -392,7 +411,6 @@ app.post('/webhook', async (req, res) => {
        session.vendorId = v.id;
        session.vendorName = v.store_name;
        
-       // Re-verify prices and availability from DB
        const itemIds = lastOrder.items.map(i => i.id).filter(id => id);
        if (itemIds.length > 0) {
           const { data: freshItems } = await supabase.from('menu_items').select('id, name, price, in_stock').in('id', itemIds);
@@ -405,7 +423,7 @@ app.post('/webhook', async (req, res) => {
              return null;
           }).filter(i => i !== null);
        } else {
-          session.cart = []; // Old order without IDs, cannot reliably reorder
+          session.cart = []; 
           await sendText(from, 'Your previous order is too old to reorder automatically. Please browse the menu.');
           await sendMenu(from, v.id, 0);
           return;
@@ -497,7 +515,7 @@ app.post('/webhook', async (req, res) => {
 
     // SERVICES
     if (listId === 'service_food' || textLower.includes('food')) {
-      await sendVendorList(from);
+      await sendVendorList(from, 0);
       return;
     }
 
@@ -525,6 +543,18 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // VENDOR PAGINATION
+    if (listId && listId.startsWith('vendor_next_')) {
+      const nextPage = parseInt(listId.replace('vendor_next_', ''), 10);
+      await sendVendorList(from, nextPage);
+      return;
+    }
+    if (listId && listId.startsWith('vendor_prev_')) {
+      const prevPage = parseInt(listId.replace('vendor_prev_', ''), 10);
+      await sendVendorList(from, prevPage);
+      return;
+    }
+
     // SELECT VENDOR & CATEGORIES
     if (listId && listId.startsWith('vendor_')) {
       const vendorId = listId.replace('vendor_', '');
@@ -537,7 +567,6 @@ app.post('/webhook', async (req, res) => {
       session.menuPage = 0;
       session.lastCategory = null;
 
-      // NEW: Check for categories
       const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', vendorId).eq('in_stock', true).not('category', 'is', null);
       const uniqueCats = [...new Set((cats || []).map(c => c.category))].filter(c => c && c.trim() !== '');
 
@@ -669,7 +698,6 @@ app.post('/webhook', async (req, res) => {
       const subtotal = cartTotal(session.cart);
       const orderNumber = '#' + Date.now().toString().slice(-6);
 
-      // Notice we are now saving item IDs to the order so Reorder works
       const { error } = await supabase.from('orders').insert({
         order_number: orderNumber,
         vendor_id: session.vendorId,
