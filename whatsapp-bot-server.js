@@ -305,12 +305,25 @@ app.post('/webhook', async (req, res) => {
 
     // LOCATION PIN HANDLING (WITH DYNAMIC FEE CALCULATION)
     if (session.step === 'AWAITING_LOCATION') {
+      
+      // Handle button clicks FIRST so the bot waits for the actual location
+      if (btnId === 'btn_share_loc') {
+         await sendText(from, '📍 *How to share your location:*\n\n1. Tap the paperclip icon (📎) at the bottom of your chat.\n2. Select *Location*.\n3. Send your *Current Location* (Not Live Location).\n\nThis allows us to calculate your exact delivery fee.');
+         return; // <--- CRITICAL: Stop here and wait for the pin
+      }
+      if (btnId === 'btn_type_addr') {
+         await sendText(from, 'Please reply with your full street address or landmark. (Note: Delivery fee will be calculated as base ₦1,000 without a pin).');
+         return; // <--- CRITICAL: Stop here and wait for the address
+      }
+
       let customerLat = null, customerLng = null;
       if (location) {
          customerLat = location.latitude; customerLng = location.longitude;
          session.address = `Lat: ${customerLat}, Long: ${customerLng}`;
       } else if (text && !listId && !btnId) {
          session.address = text;
+      } else {
+         return; // If no location or text yet, do nothing and wait
       }
 
       // Calculate fee if we have coordinates
@@ -322,14 +335,13 @@ app.post('/webhook', async (req, res) => {
            session.deliveryFee = calculateDeliveryFee(dist);
            await sendText(from, `📍 Distance calculated: *${dist.toFixed(1)} km*\nDelivery fee: *${naira(session.deliveryFee)}*`);
         } else {
-           // Vendor has no coordinates, fallback to base fee
            session.distanceKm = 0; session.deliveryFee = BASE_FEE;
         }
       } else {
-         // Typed address, can't calculate distance
          session.distanceKm = 0; session.deliveryFee = BASE_FEE;
       }
 
+      // Now that we have the location, move to the note step
       session.step = 'AWAITING_NOTE_PROMPT';
       await sendButtonMessage(from, 'Do you have any special instructions for the restaurant?', [{ id: 'btn_add_note', title: '📝 Add Note' }, { id: 'btn_skip_note', title: '⏭️ Skip' }]);
       return;
@@ -466,8 +478,6 @@ app.post('/webhook', async (req, res) => {
       ]);
       return;
     }
-    if (btnId === 'btn_share_loc') { await sendText(from, 'Please tap the attachment icon (📎) and select *Location* to send your pin.'); return; }
-    if (btnId === 'btn_type_addr') { await sendText(from, 'Please reply with your full street address or landmark. (Note: Delivery fee will be calculated as base ₦1,000 without a pin).'); return; }
 
     // CONFIRM + SAVE ORDER
     if (btnId === 'btn_confirm') {
