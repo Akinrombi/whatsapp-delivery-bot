@@ -1,9 +1,10 @@
 const express = require('express');
+const crypto = require('crypto');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));
 
 // ---------- CONFIG ----------
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
@@ -11,6 +12,8 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 
 // DELIVERY FEE CONSTANTS
 const BASE_FEE = 1000;
@@ -66,6 +69,83 @@ function alreadySeen(id) {
   if (seen.size > 2000) seen.delete(seen.values().next().value);
   return false;
 }
+
+
+// ---------- PAYSTACK CHECKOUT ----------
+async function paystackRequest(path, body) {
+  if (!PAYSTACK_SECRET_KEY) throw new Error('PAYSTACK_SECRET_KEY is not configured');
+  const response = await axios.post(`https://api.paystack.co/${path}`, body, {
+    headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    timeout: 20000
+  });
+  if (!response.data?.status) throw new Error(response.data?.message || 'Paystack request failed');
+  return response.data.data;
+}
+
+async function verifyPaystackReference(reference) {
+  if (!PAYSTACK_SECRET_KEY) throw new Error('PAYSTACK_SECRET_KEY is not configured');
+  const response = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+    headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }, timeout: 20000
+  });
+  if (!response.data?.status) throw new Error(response.data?.message || 'Payment verification failed');
+  return response.data.data;
+}
+
+async function completePaidOrder(reference, transaction) {
+  if (!transaction || transaction.status !== 'success' || transaction.reference !== reference || transaction.currency !== 'NGN') {
+    throw new Error('Paystack transaction details did not pass validation');
+  }
+  const { data: order, error: findError } = await supabase.from('orders')
+    .select('id, order_number, total, delivery_fee, payment_status, payment_reference, customer_phone, delivery_code, delivery_address, notes')
+    .eq('payment_reference', reference).maybeSingle();
+  if (findError || !order) throw new Error('No order found for payment reference');
+  const expectedKobo = Math.round((Number(order.total) + Number(order.delivery_fee || 0)) * 100);
+  if (!Number.isSafeInteger(expectedKobo) || Number(transaction.amount) !== expectedKobo) {
+    throw new Error('Paid amount does not match the order total');
+  }
+  if (order.payment_status === 'paid') return order;
+  const { data: updated, error: updateError } = await supabase.from('orders')
+    .update({ payment_status: 'paid', payment_paid_at: new Date().toISOString(), status: 'new', wa_pending: false })
+    .eq('id', order.id).neq('payment_status', 'paid')
+    .select('id, order_number, customer_phone, total, delivery_fee, delivery_address, notes').maybeSingle();
+  if (updateError) throw updateError;
+  if (updated?.customer_phone) {
+    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\n\nFood: ${naira(updated.total)}\nDelivery: ${naira(updated.delivery_fee)}\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\n📍 ${updated.delivery_address || ''}${updated.notes ? `\n📝 Note: ${updated.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
+  }
+  return updated || order;
+}
+
+app.get('/paystack/callback', async (req, res) => {
+  const reference = typeof req.query.reference === 'string' ? req.query.reference : '';
+  if (!reference) return res.status(400).send('Missing payment reference.');
+  try {
+    const transaction = await verifyPaystackReference(reference);
+    await completePaidOrder(reference, transaction);
+    return res.status(200).send('<h2>Payment verified</h2><p>Return to WhatsApp for your order update.</p>');
+  } catch (error) {
+    console.error('Paystack callback verification failed:', error.response?.data || error.message);
+    return res.status(400).send('<h2>Payment not confirmed</h2><p>Return to WhatsApp or contact support before trying to pay again.</p>');
+  }
+});
+
+app.post('/paystack/webhook', async (req, res) => {
+  const signature = req.headers['x-paystack-signature'];
+  if (!PAYSTACK_SECRET_KEY || !signature || !req.rawBody) return res.sendStatus(401);
+  const expected = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY).update(req.rawBody).digest('hex');
+  const a = Buffer.from(String(signature));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
+  res.sendStatus(200);
+  try {
+    if (req.body?.event === 'charge.success' && req.body.data?.reference) {
+      const reference = req.body.data.reference;
+      const transaction = await verifyPaystackReference(reference);
+      await completePaidOrder(reference, transaction);
+    }
+  } catch (error) {
+    console.error('Paystack webhook processing failed:', error.response?.data || error.message);
+  }
+});
 
 // ---------- WHATSAPP HELPERS ----------
 app.get('/webhook', (req, res) => {
@@ -274,6 +354,66 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+
+    // PAYSTACK EMAIL STEP: process before menu shortcuts
+    if (session.step === 'AWAITING_PAYMENT_EMAIL' && text && !listId && !btnId) {
+      const email = text.trim().toLowerCase();
+      if (!/^\S+@\S+\.\S+$/.test(email)) {
+        await sendText(from, 'Please enter a valid email address, for example name@example.com.');
+        return;
+      }
+      if (!PAYSTACK_SECRET_KEY || !PUBLIC_BASE_URL) {
+        await sendText(from, 'Online payment is not configured yet. Your order has not been placed. Please contact support.');
+        session.step = 'AWAITING_CONFIRM';
+        return;
+      }
+      if (session.cart.length === 0 || !session.vendorId) {
+        await sendText(from, 'Your checkout session has expired. Send *menu* to start again.');
+        resetSession(session);
+        return;
+      }
+      let orderId = null;
+      try {
+        const { data: vendor } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
+        if (!vendor || !vendor.is_open) {
+          await sendText(from, 'The restaurant is no longer open. Send *menu* to choose another restaurant.');
+          resetSession(session);
+          return;
+        }
+        const subtotal = cartTotal(session.cart);
+        const fee = Number(session.deliveryFee) || 0;
+        const amountKobo = Math.round((subtotal + fee) * 100);
+        if (!Number.isSafeInteger(amountKobo) || amountKobo < 100) throw new Error('Invalid order amount');
+        const pin = crypto.randomInt(1000, 10000).toString();
+        const orderNumber = '#' + Date.now().toString().slice(-6);
+        const reference = 'QE-' + crypto.randomUUID();
+        const { data: order, error: insertError } = await supabase.from('orders').insert({
+          order_number: orderNumber, vendor_id: session.vendorId, customer_name: profileName, customer_phone: from,
+          delivery_address: session.address, notes: session.note || null,
+          items: session.cart.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })),
+          total: subtotal, delivery_fee: fee, status: 'awaiting_payment', delivery_code: pin, source: 'whatsapp',
+          payment_status: 'unpaid', payment_reference: reference, wa_pending: false
+        }).select('id').single();
+        if (insertError) throw insertError;
+        orderId = order.id;
+        const payment = await paystackRequest('transaction/initialize', {
+          email, amount: amountKobo, currency: 'NGN', reference,
+          callback_url: `${PUBLIC_BASE_URL}/paystack/callback`,
+          metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
+        });
+        session.step = 'AWAITING_PAYMENT';
+        await sendText(from, `🧾 Order ${orderNumber} created.\nTotal: ${naira(subtotal + fee)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
+      } catch (error) {
+        console.error('Paystack checkout failed:', error.response?.data || error.message);
+        if (orderId) {
+          await supabase.from('orders').update({ status: 'cancelled' }).eq('id', orderId).eq('payment_status', 'unpaid');
+        }
+        await sendText(from, 'Sorry, I could not start payment. No order has been confirmed. Please try again or contact support.');
+        session.step = 'AWAITING_CONFIRM';
+      }
+      return;
+    }
+
     // MAIN MENU / CANCEL
     if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
       resetSession(session);
@@ -353,7 +493,7 @@ app.post('/webhook', async (req, res) => {
        session.note = ''; session.step = 'AWAITING_CONFIRM';
        const sub = cartTotal(session.cart);
        const feeText = session.distanceKm > 0 ? ` (${session.distanceKm.toFixed(1)} km)` : '';
-       await sendButtonMessage(from, `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(session.deliveryFee)}${feeText}\n*Total: ${naira(sub + session.deliveryFee)}*\n\n📍 ${session.address}\n\n💵 Pay cash or transfer on delivery.`,
+       await sendButtonMessage(from, `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(session.deliveryFee)}${feeText}\n*Total: ${naira(sub + session.deliveryFee)}*\n\n📍 ${session.address}\n\n🔒 Pay securely online with Paystack.`,
          [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
        return;
     }
@@ -479,23 +619,11 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // CONFIRM + SAVE ORDER
+    // CONFIRM ORDER: collect email before initializing Paystack
     if (btnId === 'btn_confirm') {
       if (session.step !== 'AWAITING_CONFIRM' || session.cart.length === 0) { await sendText(from, 'Nothing to confirm.'); return; }
-      const { data: v } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
-      if (!v || !v.is_open) { await sendText(from, 'Restaurant just closed.'); resetSession(session); return; }
-      const pin = Math.floor(1000 + Math.random() * 9000).toString();
-      const subtotal = cartTotal(session.cart);
-      const orderNumber = '#' + Date.now().toString().slice(-6);
-      const { error } = await supabase.from('orders').insert({
-        order_number: orderNumber, vendor_id: session.vendorId, customer_name: profileName, customer_phone: from,
-        delivery_address: session.address, notes: session.note || null,
-        items: session.cart.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })),
-        total: subtotal, delivery_fee: session.deliveryFee, status: 'new', delivery_code: pin, source: 'whatsapp'
-      });
-      if (error) { await sendText(from, 'Failed to place order. Try again.'); return; }
-      await sendText(from, `🎉 *Order Received!* ${orderNumber}\n\n🏪 ${session.vendorName}\nFood: ${naira(subtotal)}\nDelivery: ${naira(session.deliveryFee)}\n*Total: ${naira(subtotal + session.deliveryFee)}*\n📍 ${session.address}${session.note ? `\n📝 Note: ${session.note}` : ''}\n\n🔑 *YOUR DELIVERY PIN:* *${pin}*`);
-      resetSession(session);
+      session.step = 'AWAITING_PAYMENT_EMAIL';
+      await sendText(from, 'Please enter your email address for your Paystack payment receipt. Your order is only confirmed after payment is verified.');
       return;
     }
 
