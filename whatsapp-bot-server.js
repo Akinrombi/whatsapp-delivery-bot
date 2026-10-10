@@ -51,12 +51,12 @@ function calculateDeliveryFee(distanceKm) {
 // ---------- SESSIONS ----------
 const sessions = {};
 function getSession(phone) {
-  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null, deliveryFee: BASE_FEE, distanceKm: 0 };
+  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null, deliveryFee: BASE_FEE, distanceKm: 0, paymentMethod: 'card' };
   return sessions[phone];
 }
 function resetSession(s) { 
   s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; s.note = ''; 
-  s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null; s.deliveryFee = BASE_FEE; s.distanceKm = 0;
+  s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null; s.deliveryFee = BASE_FEE; s.distanceKm = 0; s.paymentMethod = 'card';
 }
 const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 const naira = (n) => '₦' + Number(n).toLocaleString();
@@ -88,6 +88,15 @@ async function verifyPaystackReference(reference) {
     headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }, timeout: 20000
   });
   if (!response.data?.status) throw new Error(response.data?.message || 'Payment verification failed');
+  return response.data.data;
+}
+
+async function verifyPaystackCharge(reference) {
+  if (!PAYSTACK_SECRET_KEY) throw new Error('PAYSTACK_SECRET_KEY is not configured');
+  const response = await axios.get(`https://api.paystack.co/charge/${encodeURIComponent(reference)}`, {
+    headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }, timeout: 20000
+  });
+  if (!response.data?.status) throw new Error(response.data?.message || 'Paystack charge verification failed');
   return response.data.data;
 }
 
@@ -139,7 +148,9 @@ app.post('/paystack/webhook', async (req, res) => {
   try {
     if (req.body?.event === 'charge.success' && req.body.data?.reference) {
       const reference = req.body.data.reference;
-      const transaction = await verifyPaystackReference(reference);
+      const transaction = req.body.data?.channel === 'bank_transfer'
+        ? await verifyPaystackCharge(reference)
+        : await verifyPaystackReference(reference);
       await completePaidOrder(reference, transaction);
     }
   } catch (error) {
@@ -396,13 +407,27 @@ app.post('/webhook', async (req, res) => {
         }).select('id').single();
         if (insertError) throw insertError;
         orderId = order.id;
-        const payment = await paystackRequest('transaction/initialize', {
-          email, amount: amountKobo, currency: 'NGN', reference,
-          callback_url: `${PUBLIC_BASE_URL}/paystack/callback`,
-          metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
-        });
-        session.step = 'AWAITING_PAYMENT';
-        await sendText(from, `🧾 Order ${orderNumber} created.\nTotal: ${naira(subtotal + fee)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
+        if (session.paymentMethod === 'bank_transfer') {
+          const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+          const payment = await paystackRequest('charge', {
+            email, amount: amountKobo, currency: 'NGN', reference,
+            bank_transfer: { account_expires_at: expiresAt },
+            metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
+          });
+          if (payment.status !== 'pending_bank_transfer' || !payment.account_number || !payment.bank?.name) {
+            throw new Error('Paystack did not return temporary bank transfer details');
+          }
+          session.step = 'AWAITING_PAYMENT';
+          await sendText(from, `🧾 *QuickEats Order ${orderNumber}*\nTotal: *${naira(subtotal + fee)}*\n\n🏦 *Pay by bank transfer*\nBank: ${payment.bank.name}\nAccount name: ${payment.account_name || 'Paystack'}\nAccount number: ${payment.account_number}\n\n⏳ This account expires at ${new Date(payment.account_expires_at || expiresAt).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })}.\n\nTransfer the exact amount shown above. Your order will be confirmed automatically after Paystack verifies payment. Do not send a transfer receipt as proof, and never share your PIN or OTP.`);
+        } else {
+          const payment = await paystackRequest('transaction/initialize', {
+            email, amount: amountKobo, currency: 'NGN', reference,
+            callback_url: `${PUBLIC_BASE_URL}/paystack/callback`,
+            metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
+          });
+          session.step = 'AWAITING_PAYMENT';
+          await sendText(from, `🧾 Order ${orderNumber} created.\nTotal: ${naira(subtotal + fee)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
+        }
       } catch (error) {
         console.error('Paystack checkout failed:', error.response?.data || error.message);
         if (orderId) {
@@ -619,9 +644,20 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // CONFIRM ORDER: collect email before initializing Paystack
+    // CONFIRM ORDER: choose payment method, then collect receipt email
     if (btnId === 'btn_confirm') {
       if (session.step !== 'AWAITING_CONFIRM' || session.cart.length === 0) { await sendText(from, 'Nothing to confirm.'); return; }
+      session.step = 'AWAITING_PAYMENT_METHOD';
+      await sendButtonMessage(from, '💳 *Choose how to pay*\n\nBank transfer can be completed from your banking app. Card payment uses secure Paystack checkout.', [
+        { id: 'pay_bank_transfer', title: '🏦 Bank Transfer' },
+        { id: 'pay_card', title: '💳 Card / Paystack' }
+      ]);
+      return;
+    }
+
+    if (btnId === 'pay_bank_transfer' || btnId === 'pay_card') {
+      if (session.step !== 'AWAITING_PAYMENT_METHOD' || session.cart.length === 0) { await sendText(from, 'Your checkout session expired. Send *menu* to start again.'); return; }
+      session.paymentMethod = btnId === 'pay_bank_transfer' ? 'bank_transfer' : 'card';
       session.step = 'AWAITING_PAYMENT_EMAIL';
       await sendText(from, 'Please enter your email address for your Paystack payment receipt. Your order is only confirmed after payment is verified.');
       return;
