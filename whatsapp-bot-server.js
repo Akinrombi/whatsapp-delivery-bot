@@ -13,7 +13,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\\/$/, '');
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 
 // DELIVERY FEE CONSTANTS
 const BASE_FEE = 1000;
@@ -110,7 +110,7 @@ async function completePaidOrder(reference, transaction) {
     .select('id, order_number, customer_phone, total, delivery_fee, delivery_address, notes').maybeSingle();
   if (updateError) throw updateError;
   if (updated?.customer_phone) {
-    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\\n\\nFood: ${naira(updated.total)}\\nDelivery: ${naira(updated.delivery_fee)}\\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\\n📍 ${updated.delivery_address || ''}${updated.notes ? `\\n📝 Note: ${updated.notes}` : ''}\\n\\nYour delivery PIN will be shared when your rider is on the way.`);
+    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\n\nFood: ${naira(updated.total)}\nDelivery: ${naira(updated.delivery_fee)}\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\n📍 ${updated.delivery_address || ''}${updated.notes ? `\n📝 Note: ${updated.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
   }
   return updated || order;
 }
@@ -358,7 +358,7 @@ app.post('/webhook', async (req, res) => {
     // PAYSTACK EMAIL STEP: process before menu shortcuts
     if (session.step === 'AWAITING_PAYMENT_EMAIL' && text && !listId && !btnId) {
       const email = text.trim().toLowerCase();
-      if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+      if (!/^\S+@\S+\.\S+$/.test(email)) {
         await sendText(from, 'Please enter a valid email address, for example name@example.com.');
         return;
       }
@@ -402,7 +402,7 @@ app.post('/webhook', async (req, res) => {
           metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
         });
         session.step = 'AWAITING_PAYMENT';
-        await sendText(from, `🧾 Order ${orderNumber} created.\\nTotal: ${naira(subtotal + fee)}\\n\\nPay securely using this Paystack link:\\n${payment.authorization_url}\\n\\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
+        await sendText(from, `🧾 Order ${orderNumber} created.\nTotal: ${naira(subtotal + fee)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
       } catch (error) {
         console.error('Paystack checkout failed:', error.response?.data || error.message);
         if (orderId) {
