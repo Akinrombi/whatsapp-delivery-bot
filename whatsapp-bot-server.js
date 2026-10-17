@@ -189,6 +189,105 @@ function sendList(to, header, body, button, sectionTitle, rows) {
   return sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'interactive', interactive: { type: 'list', header: { type: 'text', text: header }, body: { text: body }, action: { button, sections: [{ title: sectionTitle, rows }] } } });
 }
 
+
+/* ---------- AUTHENTICATED RIDER DELIVERY-CODE RESEND ---------- */
+const RIDER_APP_ORIGIN = process.env.RIDER_APP_ORIGIN || 'https://partner-app-5l9f.onrender.com';
+
+function setRiderApiCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin === RIDER_APP_ORIGIN) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  }
+}
+
+app.options('/api/rider/resend-delivery-code', (req, res) => {
+  setRiderApiCors(req, res);
+  if (req.headers.origin && req.headers.origin !== RIDER_APP_ORIGIN) return res.sendStatus(403);
+  return res.sendStatus(204);
+});
+
+app.post('/api/rider/resend-delivery-code', async (req, res) => {
+  setRiderApiCors(req, res);
+  if (req.headers.origin && req.headers.origin !== RIDER_APP_ORIGIN) {
+    return res.status(403).json({ success: false, message: 'This app is not allowed to use this service.' });
+  }
+
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!accessToken) return res.status(401).json({ success: false, message: 'Please sign in again.' });
+    if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID || !SUPABASE_SERVICE_KEY) {
+      console.error('Rider resend endpoint missing bot configuration.');
+      return res.status(503).json({ success: false, message: 'WhatsApp delivery messaging is not configured yet.' });
+    }
+
+    const { data: authData, error: authError } = await supabase.auth.getUser(accessToken);
+    if (authError || !authData?.user?.id) {
+      return res.status(401).json({ success: false, message: 'Your session expired. Please sign in again.' });
+    }
+
+    const orderId = typeof req.body?.order_id === 'string' ? req.body.order_id : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(orderId)) {
+      return res.status(400).json({ success: false, message: 'Invalid delivery order.' });
+    }
+
+    const { data: rider, error: riderError } = await supabase
+      .from('riders').select('id').eq('user_id', authData.user.id).maybeSingle();
+    if (riderError || !rider) return res.status(403).json({ success: false, message: 'Rider account not found.' });
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('id, order_number, rider_id, customer_phone, delivery_code, status')
+      .eq('id', orderId).eq('rider_id', rider.id).maybeSingle();
+    if (orderError || !order) return res.status(404).json({ success: false, message: 'This delivery is not assigned to your account.' });
+
+    if (!['picked_up', 'arrived_at_customer', 'on_the_way'].includes(String(order.status || '').toLowerCase())) {
+      return res.status(409).json({ success: false, message: 'You can resend the code only during the customer delivery stage.' });
+    }
+    if (!order.customer_phone || !order.delivery_code) {
+      return res.status(409).json({ success: false, message: 'The customer phone number or delivery code is missing.' });
+    }
+
+    const { data: recent, error: recentError } = await supabase
+      .from('delivery_code_resend_logs').select('created_at')
+      .eq('order_id', order.id).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (recentError) {
+      console.error('Delivery resend cooldown lookup failed:', recentError.message);
+      return res.status(500).json({ success: false, message: 'Could not check the resend limit. Please try again.' });
+    }
+    if (recent?.created_at && Date.now() - new Date(recent.created_at).getTime() < 60000) {
+      return res.status(429).json({ success: false, message: 'Please wait 60 seconds before resending the code.' });
+    }
+
+    // Reserve the cooldown before sending so rapid repeat taps cannot spam the customer.
+    const { data: logRow, error: logError } = await supabase
+      .from('delivery_code_resend_logs')
+      .insert({ order_id: order.id, rider_id: rider.id })
+      .select('id').single();
+    if (logError || !logRow) {
+      console.error('Delivery resend log insert failed:', logError?.message || 'No log row returned');
+      return res.status(500).json({ success: false, message: 'Could not start the resend. Please try again.' });
+    }
+
+    const customerPhone = String(order.customer_phone).replace(/[^0-9]/g, '');
+    const message = `🔐 *QuickEats delivery verification code*\n\nYour code for order ${order.order_number} is: *${order.delivery_code}*\n\nPlease share this code only with your assigned QuickEats rider when your order arrives.`;
+    const sent = await sendText(customerPhone, message);
+    if (!sent) {
+      await supabase.from('delivery_code_resend_logs').delete().eq('id', logRow.id);
+      return res.status(502).json({ success: false, message: 'WhatsApp could not send the message. Please try again shortly.' });
+    }
+
+    // Never return the delivery code or provider response to the rider app.
+    return res.status(200).json({ success: true, message: 'Delivery code message sent to the customer.' });
+  } catch (error) {
+    console.error('Rider delivery-code resend failed:', error.response?.data || error.message);
+    return res.status(500).json({ success: false, message: 'Could not send the delivery code message.' });
+  }
+});
+
 // ---------- BOT STEPS ----------
 async function sendMainMenu(to) {
   await sendList(to, 'David Delivery Network', 'Welcome! How can we assist you today?', 'Select Service', 'Available Services', [
