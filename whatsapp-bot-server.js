@@ -533,7 +533,7 @@ async function searchRestaurantsForNaturalOrder(to, rawText, profileName, sessio
   const rows = candidates.slice(0, 10).map((candidate, index) => ({
     id: 'match_vendor_' + candidate.vendor.id,
     title: String(candidate.vendor.store_name || ('Restaurant ' + (index + 1))).substring(0, 24),
-    description: candidate.matchedCount + '/' + candidate.requestedCount + ' items | Food ' + naira(candidate.subtotal) + (candidate.customItems.length ? ' | ' + candidate.customItems.length + ' for quote' : ' | All listed').substring(0, 72)
+    description: (candidate.matchedCount + '/' + candidate.requestedCount + ' items | Food ' + naira(candidate.subtotal) + (candidate.customItems.length ? ' | ' + candidate.customItems.length + ' for quote' : ' | All listed')).substring(0, 72)
   }));
   const fullCount = candidates.filter(c => c.fullMatch).length;
   const lead = fullCount
@@ -784,6 +784,7 @@ app.post('/webhook', async (req, res) => {
 
     // MAIN MENU / CANCEL
     if (['hi', 'hello', 'start', 'menu'].includes(textLower) || btnId === 'btn_cancel') {
+      if (session.pendingQuoteToken) await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('token', session.pendingQuoteToken).eq('status', 'pending');
       resetSession(session);
       const { data: lastOrder } = await supabase.from('orders').select('*').eq('customer_phone', from).order('created_at', { ascending: false }).limit(1).maybeSingle();
       if (lastOrder && lastOrder.items && lastOrder.items.length > 0) {
@@ -888,7 +889,7 @@ app.post('/webhook', async (req, res) => {
     // SERVICES
     if (listId === 'service_food' || /^(?:order food|food)$/i.test(textLower)) { await sendVendorList(from, 0); return; }
     if (listId === 'service_search' || textLower.startsWith('search ') || textLower.startsWith('find ')) {
-      if (listId === 'service_search') { session.step = 'AWAITING_GLOBAL_SEARCH'; await sendText(from, '🔍 *What are you looking for?*\\n\\nReply with a restaurant or dish name.'); return; }
+      if (listId === 'service_search') { session.step = 'AWAITING_GLOBAL_SEARCH'; await sendText(from, '🔍 *What are you looking for?*\n\nReply with a restaurant or dish name.'); return; }
       else { await performGlobalSearch(from, text.replace(/^(search|find)\\s+/i, ''), session); return; }
     }
     if (listId === 'nav_search_menu') { session.step = 'AWAITING_MENU_SEARCH'; await sendText(from, '🔍 *Search this Menu*\\n\\nReply with the dish name:'); return; }
