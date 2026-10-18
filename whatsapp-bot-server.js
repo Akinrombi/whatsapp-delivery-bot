@@ -599,6 +599,17 @@ async function handleVendorQuoteReply(from, text) {
   const customerPhone = quote.customer_phone;
   if (match[1].toUpperCase() === 'NO') {
     await supabase.from('whatsapp_quote_requests').update({ status: 'unavailable', updated_at: new Date().toISOString() }).eq('id', quote.id);
+    const customerSession = getSession(customerPhone);
+    if (customerSession.pendingQuoteToken === token) {
+      customerSession.pendingQuoteToken = null;
+      customerSession.pendingNaturalOrder = null;
+      customerSession.matchCandidates = {};
+      customerSession.customItems = [];
+      customerSession.cart = [];
+      customerSession.vendorId = null;
+      customerSession.vendorName = '';
+      customerSession.step = 'IDLE';
+    }
     await sendText(customerPhone, vendor.store_name + ' cannot supply the custom item(s) in your request. No order or payment has been created. Reply with a revised food order to search again.');
     await sendText(from, 'Thanks. The customer has been told the custom request is unavailable.');
     return true;
@@ -896,7 +907,7 @@ app.post('/webhook', async (req, res) => {
     if (listId === 'service_ride' || listId === 'service_package') { await sendText(from, 'Coming soon! Send *menu* to order food.'); return; }
 
     // Natural-language food orders: search all open restaurants before asking the customer to choose
-    if (session.step === 'IDLE' && text && !listId && !btnId && !/^(?:hi|hello|start|menu|cancel)$/i.test(textLower)) {
+    if ((session.step === 'IDLE' || session.step === 'AWAITING_MATCH_RESTAURANT') && text && !listId && !btnId && !/^(?:hi|hello|start|menu|cancel)$/i.test(textLower)) {
       await searchRestaurantsForNaturalOrder(from, text, profileName, session);
       return;
     }
