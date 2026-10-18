@@ -536,7 +536,7 @@ async function searchRestaurantsForNaturalOrder(to, rawText, profileName, sessio
       matchedRequests.push({ requestedName: requested.name, menuName: match.name, qty: requested.qty });
     }
     if (!matchedRequests.length) continue;
-    if (customItems.length && !vendor.phone) continue;
+    // Custom items are accepted without contacting the restaurant; missing prices are not guessed.
     const subtotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
     candidates.push({ vendor, cart, customItems, matchedRequests, subtotal, matchedCount: matchedRequests.length, requestedCount: requestedItems.length, fullMatch: customItems.length === 0 });
   }
@@ -554,51 +554,48 @@ async function searchRestaurantsForNaturalOrder(to, rawText, profileName, sessio
   const rows = candidates.slice(0, 10).map((candidate, index) => ({
     id: 'match_vendor_' + candidate.vendor.id,
     title: String(candidate.vendor.store_name || ('Restaurant ' + (index + 1))).substring(0, 24),
-    description: (candidate.matchedCount + '/' + candidate.requestedCount + ' items | Food ' + naira(candidate.subtotal) + (candidate.customItems.length ? ' | ' + candidate.customItems.length + ' for quote' : ' | All listed')).substring(0, 72)
+    description: (candidate.matchedCount + '/' + candidate.requestedCount + ' priced | Food ' + naira(candidate.subtotal) + (candidate.customItems.length ? ' | ' + candidate.customItems.length + ' unpriced at ₦0' : ' | All listed')).substring(0, 72)
   }));
   const fullCount = candidates.filter(c => c.fullMatch).length;
   const lead = fullCount
     ? 'I found ' + fullCount + ' restaurant(s) with every requested item listed. Full matches are shown first.'
-    : 'I found restaurants with some of your items. Missing items need vendor availability and price confirmation.';
+    : 'I found restaurants with some listed items. Missing items can be included without contacting the restaurant, at ₦0 until admin pricing is added.';
   await sendList(to, 'Restaurants for Your Order', lead + '\n\nChoose one restaurant. Each order comes from one restaurant.', 'Choose Restaurant', 'Matches', rows);
 }
 
 async function startVendorCustomQuote(to, profileName, session, candidate) {
-  if (!candidate.vendor.phone) {
-    await sendText(to, 'This restaurant has no vendor contact number for custom-item confirmation. Please choose a restaurant with all items listed or start a new search.');
-    return;
-  }
-  const token = crypto.randomBytes(4).toString('hex').toUpperCase();
-  const { data: quote, error } = await supabase.from('whatsapp_quote_requests').insert({
-    token, vendor_id: candidate.vendor.id, customer_phone: to, customer_name: profileName || 'Customer',
-    requested_items: session.pendingNaturalOrder.requestedItems,
-    cart_items: candidate.cart, custom_items: candidate.customItems, status: 'pending',
-    expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString()
-  }).select('id, token').single();
-  if (error || !quote) {
-    console.error('Could not save custom quote request:', error?.message);
-    await sendText(to, 'Sorry, I could not send the custom-item request. No order has been placed. Please try again.');
-    return;
-  }
+  // QuickEats accepts the order immediately and never contacts the restaurant for custom items.
+  // Items missing from the saved menu are included at ₦0 until an admin adds a menu price.
+  // This avoids inventing a price or charging the customer an amount they were not shown.
   session.vendorId = candidate.vendor.id;
   session.vendorName = candidate.vendor.store_name;
-  session.cart = candidate.cart.map(item => ({ ...item }));
-  session.customItems = candidate.customItems;
-  session.pendingQuoteToken = token;
-  session.step = 'AWAITING_VENDOR_QUOTE';
-
-  const customLines = candidate.customItems.map((item, index) => (index + 1) + '. ' + item.qty + ' ' + (item.unit === 'piece' ? 'piece(s) of ' : '') + item.name).join('\n');
-  const vendorPhone = normalizeWhatsAppPhone(candidate.vendor.phone);
-  const vendorMessage = 'QuickEats custom-item price request\nRestaurant: ' + candidate.vendor.store_name + '\nCustomer order request ' + token + ' (expires in 30 minutes):\n' + customLines + '\n\nReply with unit prices in naira, using this exact format:\nQUOTE ' + token + ' 1=1500 2=500\nThe numbers match the item list above. Do not use commas in prices. If you cannot supply the requested custom item(s), reply:\nNO ' + token;
-  const sent = vendorPhone && await sendText(vendorPhone, vendorMessage);
-  if (!sent) {
-    await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('id', quote.id);
-    session.step = 'AWAITING_MATCH_RESTAURANT';
-    session.pendingQuoteToken = null;
-    await sendText(to, 'I could not contact this restaurant to confirm custom items. Please choose a restaurant with all items listed or try another restaurant.');
-    return;
-  }
-  await sendText(to, 'I found *' + candidate.vendor.store_name + '* for your order. The vendor needs to confirm the price and availability of:\n' + customLines + '\n\nI have sent the request to the restaurant. I will ask you to review the final total after the vendor replies. No order or payment has been created yet.');
+  session.cart = (candidate.cart || []).map(item => ({ ...item }));
+  const unpricedItems = (candidate.customItems || []).map((item, index) => ({
+    id: 'custom_' + Date.now() + '_' + index,
+    name: item.name,
+    price: 0,
+    qty: Math.max(1, Number(item.qty) || 1),
+    custom: true,
+    unit: item.unit || null
+  }));
+  session.cart.push(...unpricedItems);
+  session.customItems = [];
+  session.pendingQuoteToken = null;
+  session.pendingNaturalOrder = null;
+  session.matchCandidates = {};
+  session.step = 'IDLE';
+  const unpricedNames = unpricedItems.map(item => '• ' + item.qty + ' × ' + item.name).join('\n');
+  session.note = [session.note, unpricedItems.length
+    ? 'Unlisted custom items (currently priced at ₦0 until admin adds prices): ' + unpricedItems.map(item => item.qty + ' x ' + item.name).join(', ')
+    : ''].filter(Boolean).join('\n');
+  await sendCartView(
+    to,
+    session,
+    '✅ Order accepted for *' + candidate.vendor.store_name + '*.' +
+    (unpricedItems.length
+      ? '\n\nThese requested items are not on the saved menu, so they are included at ₦0 for now. No restaurant was contacted. Please review the cart and total before checkout:\n' + unpricedNames
+      : '\n\nNo restaurant was contacted.')
+  );
 }
 
 async function handleVendorQuoteReply(from, text) {
