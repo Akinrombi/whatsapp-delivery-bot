@@ -670,7 +670,7 @@ async function handleVendorQuoteReply(from, text) {
   return true;
 }
 
-function cartSummary(cart) { return cart.map((i, idx) => `${idx + 1}. ${i.qty}x ${i.name} - ${naira(i.price * i.qty)}`).join('\n'); }
+function cartSummary(cart) { return cart.map((i, idx) => { const qty = Number(i.qty) || 0; const unitPrice = Number(i.price) || 0; const lineTotal = Math.round(qty * unitPrice * 100) / 100; return `${idx + 1}. ${qty} × ${i.name}\n   ${unitPrice > 0 ? `${naira(unitPrice)} each × ${qty} = ${naira(lineTotal)}` : `Unit price: not listed yet | Line total: ${naira(lineTotal)}`}`; }).join('\n'); }
 function sendCartView(to, session, note = '') {
   return sendButtonMessage(to, `${note ? note + '\n\n' : ''}🛒 *Your Order So Far*\n\n${cartSummary(session.cart)}\n\n*Food total: ${naira(cartTotal(session.cart))}*\n\nChoose one option below. You can add more food, remove items, or continue to delivery details. Delivery fee and final total will be shown before you confirm.`,
     [{ id: 'btn_add_more', title: '➕ Add Food' }, { id: 'btn_editcart', title: '➖ Remove Food' }, { id: 'btn_checkout', title: '➡️ Continue' }]);
@@ -780,7 +780,7 @@ app.post('/webhook', async (req, res) => {
         const { data: order, error: insertError } = await supabase.from('orders').insert({
           order_number: orderNumber, vendor_id: session.vendorId, customer_name: profileName, customer_phone: from,
           delivery_address: session.address, notes: session.note || null,
-          items: session.cart.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })),
+          items: session.cart.map(i => { const qty = Number(i.qty) || 0; const unitPrice = Number(i.price) || 0; return { id: i.id, name: i.name, qty, quantity: qty, price: unitPrice, unit_price: unitPrice, line_total: Math.round(qty * unitPrice * 100) / 100, custom: !!i.custom, unit: i.unit || null }; }),
           total: subtotal, delivery_fee: fee, status: 'awaiting_payment', delivery_code: pin, source: 'whatsapp',
           payment_status: 'unpaid', payment_reference: reference, wa_pending: false
         }).select('id').single();
