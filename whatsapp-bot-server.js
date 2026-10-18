@@ -291,11 +291,11 @@ app.post('/api/rider/resend-delivery-code', async (req, res) => {
 
 // ---------- BOT STEPS ----------
 async function sendMainMenu(to) {
-  await sendList(to, 'David Delivery Network', 'Welcome! How can we assist you today?', 'Select Service', 'Available Services', [
-    { id: 'service_food', title: '🍔 Order Food', description: 'Order from local restaurants' },
-    { id: 'service_search', title: '🔍 Search', description: 'Find restaurants or dishes' }, 
-    { id: 'service_ride', title: '🛺 Book a Ride', description: 'Request fast transport' },
-    { id: 'service_package', title: '📦 Send a Package', description: 'Doorstep parcel delivery' }
+  await sendList(to, 'QuickEats 🍽️', 'Welcome! Ordering is easy. Tap Order Food to browse restaurants, or simply type what you want, for example: 2 jollof rice and 3 chicken. I will find restaurants and show you the prices before checkout.', 'Start Order', 'What would you like?', [
+    { id: 'service_food', title: '🍔 Order Food', description: 'Browse open restaurants and menus' },
+    { id: 'service_search', title: '🔍 Find Food', description: 'Search for a dish or restaurant' },
+    { id: 'service_ride', title: '🛺 Book a Ride', description: 'Coming soon' },
+    { id: 'service_package', title: '📦 Send a Package', description: 'Coming soon' }
   ]);
 }
 
@@ -314,7 +314,7 @@ async function sendVendorList(to, page = 0, note = '') {
     if (page > 0) rows.push({ id: `vendor_prev_${page - 1}`, title: '◀ Previous', description: `Page ${page} of ${totalPages}` });
     if (page + 1 < totalPages) rows.push({ id: `vendor_next_${page + 1}`, title: 'More ▶', description: `Page ${page + 2} of ${totalPages}` });
   }
-  await sendList(to, 'Select Restaurant', 'Choose an open restaurant:', 'View Restaurants', 'Open Stores', rows);
+  await sendList(to, 'Choose a Restaurant', 'Tap one restaurant below. You can also type the food you want and I will search menus for you.', 'Choose Restaurant', 'Open Restaurants', rows);
 }
 
 async function sendMenuList(to, vendorId, page = 0, note = '', category = null) {
@@ -356,8 +356,8 @@ async function sendMenuList(to, vendorId, page = 0, note = '', category = null) 
     ]});
   }
 
-  let body = note ? `${note}\n\n` : 'Tap an item to add it (+1).';
-  if (session.cart.length) body += `\n\n🛒 Cart: ${naira(cartTotal(session.cart))}`;
+  let body = note ? `${note}\n\n` : 'Tap any food to add 1. Need more than 1? Tap it again, or use the quantity selector if shown.';
+  if (session.cart.length) body += `\n\n🛒 Your cart: ${naira(cartTotal(session.cart))}\nTap “View Cart / Checkout” when you are ready.`;
 
   await sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'interactive', interactive: { type: 'list', header: { type: 'text', text: (session.vendorName || 'Menu').substring(0, 60) + (category && category !== 'all' ? ` - ${category}` : '') }, body: { text: body.substring(0, 1000) }, action: { button: 'Browse Menu', sections } } });
 }
@@ -659,8 +659,8 @@ async function handleVendorQuoteReply(from, text) {
 
 function cartSummary(cart) { return cart.map((i, idx) => `${idx + 1}. ${i.qty}x ${i.name} - ${naira(i.price * i.qty)}`).join('\n'); }
 function sendCartView(to, session, note = '') {
-  return sendButtonMessage(to, `${note ? note + '\n\n' : ''}🛒 *Your Cart*\n\n${cartSummary(session.cart)}\n\n*Food total:* ${naira(cartTotal(session.cart))}\n\n_Send *menu* any time to start over._`,
-    [{ id: 'btn_add_more', title: '➕ Add Items' }, { id: 'btn_editcart', title: '➖ Remove Items' }, { id: 'btn_checkout', title: '✅ Checkout' }]);
+  return sendButtonMessage(to, `${note ? note + '\n\n' : ''}🛒 *Your Order So Far*\n\n${cartSummary(session.cart)}\n\n*Food total: ${naira(cartTotal(session.cart))}*\n\nChoose one option below. You can add more food, remove items, or continue to delivery details. Delivery fee and final total will be shown before you confirm.`,
+    [{ id: 'btn_add_more', title: '➕ Add Food' }, { id: 'btn_editcart', title: '➖ Remove Food' }, { id: 'btn_checkout', title: '➡️ Continue' }]);
 }
 function sendEditCartList(to, session) {
   const rows = session.cart.slice(0, 9).map(i => ({ id: `cartrm_${i.id}`, title: `${i.qty}x ${i.name}`.substring(0, 24), description: `${naira(i.price * i.qty)} | tap to remove 1` }));
