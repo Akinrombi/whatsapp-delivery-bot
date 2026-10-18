@@ -715,14 +715,20 @@ app.post('/webhook', async (req, res) => {
     // Vendor replies to a pending custom-item quote request
     if (text && /^(?:QUOTE|NO)\s+[A-Z0-9]+\b/i.test(text) && await handleVendorQuoteReply(from, text)) return;
 
-    // Customer waiting for vendor quote: do not accidentally start another checkout
+    // Customer waiting for vendor quote: allow menu/start to cancel the pending request
     if (session.step === 'AWAITING_VENDOR_QUOTE' && text && !listId && !btnId) {
-      if (textLower === 'cancel') {
-        await sendText(from, 'Your custom quote is still pending with the restaurant. Reply *menu* to start a new order; the old request will expire automatically.');
+      if (['menu', 'start', 'hi', 'hello'].includes(textLower)) {
+        if (session.pendingQuoteToken) await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('token', session.pendingQuoteToken).eq('status', 'pending');
+        resetSession(session);
+      } else if (textLower === 'cancel') {
+        if (session.pendingQuoteToken) await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('token', session.pendingQuoteToken).eq('status', 'pending');
+        resetSession(session);
+        await sendText(from, 'Your pending custom quote has been cancelled. Send *menu* to start again.');
+        return;
       } else {
-        await sendText(from, 'I am still waiting for the restaurant to confirm the custom items and prices. I will message you here when it replies.');
+        await sendText(from, 'I am still waiting for the restaurant to confirm the custom items and prices. Send *menu* if you want to cancel this request and start again.');
+        return;
       }
-      return;
     }
 
     // PAYSTACK EMAIL STEP: process before menu shortcuts
