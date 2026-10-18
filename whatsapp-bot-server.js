@@ -51,12 +51,13 @@ function calculateDeliveryFee(distanceKm) {
 // ---------- SESSIONS ----------
 const sessions = {};
 function getSession(phone) {
-  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null, deliveryFee: BASE_FEE, distanceKm: 0, paymentMethod: 'card' };
+  if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null, deliveryFee: BASE_FEE, distanceKm: 0, paymentMethod: 'card', pendingNaturalOrder: null, matchCandidates: {}, customItems: [], pendingQuoteToken: null };
   return sessions[phone];
 }
 function resetSession(s) { 
   s.cart = []; s.step = 'IDLE'; s.vendorId = null; s.vendorName = ''; s.address = ''; s.note = ''; 
   s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null; s.deliveryFee = BASE_FEE; s.distanceKm = 0; s.paymentMethod = 'card';
+  s.pendingNaturalOrder = null; s.matchCandidates = {}; s.customItems = []; s.pendingQuoteToken = null;
 }
 const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 const naira = (n) => '₦' + Number(n).toLocaleString();
@@ -410,6 +411,236 @@ async function performGlobalSearch(to, query, session) {
   await sendList(to, 'Search Results', `🔍 *Results for "${query}"*`, 'View Results', 'Matches', rows.slice(0, 10));
 }
 
+
+// ---------- NATURAL-LANGUAGE ORDER DISCOVERY ----------
+const NUMBER_WORDS = { one: 1, a: 1, an: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20 };
+
+function normalizeFoodText(value) {
+  return String(value || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseNaturalOrderText(rawText) {
+  let text = String(rawText || '').toLowerCase().trim();
+  text = text.replace(/^(?:hi|hello|please)\s*[,!:\-]?\s*/i, '');
+  text = text.replace(/^(?:i would like|i'd like|i want|can i get|could i get|please get me|get me|i need|order|i'll have)\s+/i, '');
+  const separators = /[,;]+|\s+\+\s+|\s+and\s+(?=(?:\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b)/i;
+  const segments = text.split(separators).map(s => s.trim()).filter(Boolean);
+  const items = [];
+  for (const segment of segments) {
+    let part = segment.replace(/^(?:please|also|and)\s+/i, '').trim();
+    const qtyMatch = part.match(/^(\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b\s*(?:(pieces?|pcs?|plates?|portions?|servings?)\s+(?:of\s+)?)?/i);
+    let qty = 1;
+    let unit = null;
+    if (qtyMatch) {
+      qty = Number(qtyMatch[1]) || NUMBER_WORDS[qtyMatch[1]] || 1;
+      if (qtyMatch[2]) unit = /^piece|^pc/i.test(qtyMatch[2]) ? 'piece' : 'plate';
+      part = part.slice(qtyMatch[0].length).trim();
+    }
+    part = part.replace(/^(?:of|some)\s+/i, '').replace(/\b(?:please|thanks|thank you)\b/gi, '').trim();
+    part = part.replace(/^(?:pieces?|pcs?|plates?|portions?|servings?)\s+of\s+/i, '').trim();
+    if (!part || !/[a-z]/i.test(part)) continue;
+    qty = Math.max(1, Math.min(50, Number(qty) || 1));
+    const normalized = normalizeFoodText(part);
+    const existing = items.find(i => normalizeFoodText(i.name) === normalized);
+    if (existing) existing.qty = Math.min(50, existing.qty + qty);
+    else items.push({ name: part, normalized, qty, unit });
+  }
+  return items;
+}
+
+function findMatchingMenuItem(requestName, menuItems) {
+  const requested = normalizeFoodText(requestName);
+  if (!requested) return null;
+  const requestTokens = requested.split(' ').filter(Boolean);
+  const candidates = (menuItems || []).map(item => {
+    const normalized = normalizeFoodText(item.name);
+    const itemTokens = normalized.split(' ').filter(Boolean);
+    let score = 0;
+    if (normalized === requested) score = 1000;
+    else if (normalized.includes(requested)) score = 800 - Math.max(0, itemTokens.length - requestTokens.length);
+    else if (requestTokens.every(token => itemTokens.includes(token))) score = 700 - Math.max(0, itemTokens.length - requestTokens.length);
+    return { item, score, length: itemTokens.length };
+  }).filter(c => c.score > 0).sort((a, b) => b.score - a.score || a.length - b.length);
+  return candidates[0]?.item || null;
+}
+
+function normalizeWhatsAppPhone(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.startsWith('0') && digits.length === 11) digits = '234' + digits.slice(1);
+  else if (digits.length === 10) digits = '234' + digits;
+  return digits;
+}
+
+async function searchRestaurantsForNaturalOrder(to, rawText, profileName, session) {
+  const requestedItems = parseNaturalOrderText(rawText);
+  if (!requestedItems.length) {
+    await sendText(to, 'Please type your food and quantities, for example: *2 jollof rice, 3 chicken and 10 pieces of meat*. I will search restaurants for you.');
+    return;
+  }
+  const { data: vendors, error: vendorError } = await supabase.from('vendors')
+    .select('id, store_name, address, phone, latitude, longitude')
+    .eq('is_open', true).order('store_name', { ascending: true }).limit(200);
+  if (vendorError || !vendors?.length) {
+    await sendText(to, 'Sorry, I could not find any open restaurants right now. Please try again shortly.');
+    return;
+  }
+  const vendorIds = vendors.map(v => v.id);
+  const { data: menuItems, error: menuError } = await supabase.from('menu_items')
+    .select('id, name, price, vendor_id, in_stock, category')
+    .in('vendor_id', vendorIds).eq('in_stock', true).limit(3000);
+  if (menuError) {
+    console.error('Natural order menu search failed:', menuError.message);
+    await sendText(to, 'Sorry, I could not search restaurant menus right now. Please try again shortly.');
+    return;
+  }
+  const grouped = new Map(vendors.map(v => [v.id, []]));
+  for (const item of menuItems || []) if (grouped.has(item.vendor_id)) grouped.get(item.vendor_id).push(item);
+
+  const candidates = [];
+  for (const vendor of vendors) {
+    const vendorMenu = grouped.get(vendor.id) || [];
+    const cart = [];
+    const customItems = [];
+    const matchedRequests = [];
+    for (const requested of requestedItems) {
+      const match = findMatchingMenuItem(requested.name, vendorMenu);
+      if (!match) {
+        customItems.push({ name: requested.name, qty: requested.qty, unit: requested.unit });
+        continue;
+      }
+      const existing = cart.find(c => c.id === match.id);
+      if (existing) existing.qty = Math.min(50, existing.qty + requested.qty);
+      else cart.push({ id: match.id, name: match.name, price: Number(match.price), qty: requested.qty });
+      matchedRequests.push({ requestedName: requested.name, menuName: match.name, qty: requested.qty });
+    }
+    if (!matchedRequests.length) continue;
+    if (customItems.length && !vendor.phone) continue;
+    const subtotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
+    candidates.push({ vendor, cart, customItems, matchedRequests, subtotal, matchedCount: matchedRequests.length, requestedCount: requestedItems.length, fullMatch: customItems.length === 0 });
+  }
+  candidates.sort((a, b) => Number(b.fullMatch) - Number(a.fullMatch) || b.matchedCount - a.matchedCount || a.subtotal - b.subtotal || String(a.vendor.store_name).localeCompare(String(b.vendor.store_name)));
+
+  if (!candidates.length) {
+    await sendText(to, 'I could not find an open restaurant with any of those listed items. Please check the food names or send a simpler order, such as *2 jollof rice, 3 chicken*. Custom requests need a restaurant with a registered contact number so the vendor can confirm them.');
+    return;
+  }
+
+  session.pendingNaturalOrder = { requestedItems, profileName: profileName || 'Customer', rawText };
+  session.matchCandidates = {};
+  candidates.slice(0, 10).forEach(candidate => { session.matchCandidates[candidate.vendor.id] = candidate; });
+  session.step = 'AWAITING_MATCH_RESTAURANT';
+  const rows = candidates.slice(0, 10).map((candidate, index) => ({
+    id: 'match_vendor_' + candidate.vendor.id,
+    title: String(candidate.vendor.store_name || ('Restaurant ' + (index + 1))).substring(0, 24),
+    description: candidate.matchedCount + '/' + candidate.requestedCount + ' items | Food ' + naira(candidate.subtotal) + (candidate.customItems.length ? ' | ' + candidate.customItems.length + ' for quote' : ' | All listed').substring(0, 72)
+  }));
+  const fullCount = candidates.filter(c => c.fullMatch).length;
+  const lead = fullCount
+    ? 'I found ' + fullCount + ' restaurant(s) with every requested item listed. Full matches are shown first.'
+    : 'I found restaurants with some of your items. Missing items need vendor availability and price confirmation.';
+  await sendList(to, 'Restaurants for Your Order', lead + '\n\nChoose one restaurant. Each order comes from one restaurant.', 'Choose Restaurant', 'Matches', rows);
+}
+
+async function startVendorCustomQuote(to, profileName, session, candidate) {
+  if (!candidate.vendor.phone) {
+    await sendText(to, 'This restaurant has no vendor contact number for custom-item confirmation. Please choose a restaurant with all items listed or start a new search.');
+    return;
+  }
+  const token = crypto.randomBytes(4).toString('hex').toUpperCase();
+  const { data: quote, error } = await supabase.from('whatsapp_quote_requests').insert({
+    token, vendor_id: candidate.vendor.id, customer_phone: to, customer_name: profileName || 'Customer',
+    requested_items: session.pendingNaturalOrder.requestedItems,
+    cart_items: candidate.cart, custom_items: candidate.customItems, status: 'pending',
+    expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  }).select('id, token').single();
+  if (error || !quote) {
+    console.error('Could not save custom quote request:', error?.message);
+    await sendText(to, 'Sorry, I could not send the custom-item request. No order has been placed. Please try again.');
+    return;
+  }
+  session.vendorId = candidate.vendor.id;
+  session.vendorName = candidate.vendor.store_name;
+  session.cart = candidate.cart.map(item => ({ ...item }));
+  session.customItems = candidate.customItems;
+  session.pendingQuoteToken = token;
+  session.step = 'AWAITING_VENDOR_QUOTE';
+
+  const customLines = candidate.customItems.map((item, index) => (index + 1) + '. ' + item.qty + ' ' + (item.unit === 'piece' ? 'piece(s) of ' : '') + item.name).join('\n');
+  const vendorPhone = normalizeWhatsAppPhone(candidate.vendor.phone);
+  const vendorMessage = 'QuickEats custom-item price request\nRestaurant: ' + candidate.vendor.store_name + '\nCustomer order request ' + token + ' (expires in 30 minutes):\n' + customLines + '\n\nReply with unit prices in naira, using this exact format:\nQUOTE ' + token + ' 1=1500 2=500\nThe numbers match the item list above. Do not use commas in prices. If you cannot supply the requested custom item(s), reply:\nNO ' + token;
+  const sent = vendorPhone && await sendText(vendorPhone, vendorMessage);
+  if (!sent) {
+    await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('id', quote.id);
+    session.step = 'AWAITING_MATCH_RESTAURANT';
+    session.pendingQuoteToken = null;
+    await sendText(to, 'I could not contact this restaurant to confirm custom items. Please choose a restaurant with all items listed or try another restaurant.');
+    return;
+  }
+  await sendText(to, 'I found *' + candidate.vendor.store_name + '* for your order. The vendor needs to confirm the price and availability of:\n' + customLines + '\n\nI have sent the request to the restaurant. I will ask you to review the final total after the vendor replies. No order or payment has been created yet.');
+}
+
+async function handleVendorQuoteReply(from, text) {
+  const match = String(text || '').trim().match(/^(QUOTE|NO)\s+([A-Z0-9]+)(?:\s+([\s\S]+))?$/i);
+  if (!match) return false;
+  const token = match[2].toUpperCase();
+  const { data: quote, error } = await supabase.from('whatsapp_quote_requests').select('*').eq('token', token).maybeSingle();
+  if (error || !quote) return false;
+  const { data: vendor } = await supabase.from('vendors').select('id, store_name, phone').eq('id', quote.vendor_id).maybeSingle();
+  if (!vendor || normalizeWhatsAppPhone(vendor.phone) !== normalizeWhatsAppPhone(from)) {
+    await sendText(from, 'Only the selected restaurant can reply to this custom quote request.');
+    return true;
+  }
+  if (quote.status !== 'pending' || new Date(quote.expires_at).getTime() < Date.now()) {
+    if (quote.status === 'pending') await supabase.from('whatsapp_quote_requests').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('id', quote.id);
+    await sendText(from, 'This QuickEats quote request has expired or has already been answered.');
+    return true;
+  }
+  const customerPhone = quote.customer_phone;
+  if (match[1].toUpperCase() === 'NO') {
+    await supabase.from('whatsapp_quote_requests').update({ status: 'unavailable', updated_at: new Date().toISOString() }).eq('id', quote.id);
+    await sendText(customerPhone, vendor.store_name + ' cannot supply the custom item(s) in your request. No order or payment has been created. Reply with a revised food order to search again.');
+    await sendText(from, 'Thanks. The customer has been told the custom request is unavailable.');
+    return true;
+  }
+
+  const customItems = Array.isArray(quote.custom_items) ? quote.custom_items : [];
+  const priceText = match[3] || '';
+  const prices = {};
+  let priceMatch;
+  const priceRegex = /(\d+)\s*=\s*(\d+(?:\.\d{1,2})?)/g;
+  while ((priceMatch = priceRegex.exec(priceText)) !== null) prices[Number(priceMatch[1])] = Number(priceMatch[2]);
+  const quotedItems = [];
+  for (let i = 0; i < customItems.length; i++) {
+    const unitPrice = prices[i + 1];
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+      await sendText(from, 'Please quote every item. Reply like: QUOTE ' + token + ' 1=1500 2=500. These are unit prices in naira, without commas.');
+      return true;
+    }
+    quotedItems.push({ id: 'custom_' + token + '_' + (i + 1), name: customItems[i].name, qty: Number(customItems[i].qty) || 1, price: unitPrice, custom: true, unit: customItems[i].unit || null });
+  }
+  const { error: updateError } = await supabase.from('whatsapp_quote_requests').update({ status: 'quoted', quoted_items: quotedItems, updated_at: new Date().toISOString() }).eq('id', quote.id).eq('status', 'pending');
+  if (updateError) {
+    console.error('Could not save vendor quote:', updateError.message);
+    await sendText(from, 'I could not save that quote. Please try replying again.');
+    return true;
+  }
+
+  const session = getSession(customerPhone);
+  session.vendorId = vendor.id;
+  session.vendorName = vendor.store_name;
+  session.cart = [...(Array.isArray(quote.cart_items) ? quote.cart_items : []), ...quotedItems].map(item => ({ id: item.id, name: item.name, price: Number(item.price), qty: Number(item.qty) || 1, custom: !!item.custom, unit: item.unit || null }));
+  session.customItems = [];
+  session.pendingQuoteToken = null;
+  session.pendingNaturalOrder = null;
+  session.matchCandidates = {};
+  session.step = 'IDLE';
+  await sendText(customerPhone, 'Good news! *' + vendor.store_name + '* confirmed the custom items and prices. Please review the updated order and total below. You can remove items or add more before checkout.');
+  await sendCartView(customerPhone, session, 'Vendor-confirmed custom prices:');
+  await sendText(from, 'Quote ' + token + ' saved. The customer has been sent the updated order for review.');
+  return true;
+}
+
 function cartSummary(cart) { return cart.map((i, idx) => `${idx + 1}. ${i.qty}x ${i.name} - ${naira(i.price * i.qty)}`).join('\n'); }
 function sendCartView(to, session, note = '') {
   return sendButtonMessage(to, `${note ? note + '\n\n' : ''}🛒 *Your Cart*\n\n${cartSummary(session.cart)}\n\n*Food total:* ${naira(cartTotal(session.cart))}\n\n_Send *menu* any time to start over._`,
@@ -464,6 +695,19 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+
+    // Vendor replies to a pending custom-item quote request
+    if (text && /^(?:QUOTE|NO)\s+[A-Z0-9]+\b/i.test(text) && await handleVendorQuoteReply(from, text)) return;
+
+    // Customer waiting for vendor quote: do not accidentally start another checkout
+    if (session.step === 'AWAITING_VENDOR_QUOTE' && text && !listId && !btnId) {
+      if (textLower === 'cancel') {
+        await sendText(from, 'Your custom quote is still pending with the restaurant. Reply *menu* to start a new order; the old request will expire automatically.');
+      } else {
+        await sendText(from, 'I am still waiting for the restaurant to confirm the custom items and prices. I will message you here when it replies.');
+      }
+      return;
+    }
 
     // PAYSTACK EMAIL STEP: process before menu shortcuts
     if (session.step === 'AWAITING_PAYMENT_EMAIL' && text && !listId && !btnId) {
@@ -642,6 +886,20 @@ app.post('/webhook', async (req, res) => {
     }
 
     // SERVICES
+    if (listId === 'service_food' || /^(?:order food|food)$/i.test(textLower)) { await sendVendorList(from, 0); return; }
+    if (listId === 'service_search' || textLower.startsWith('search ') || textLower.startsWith('find ')) {
+      if (listId === 'service_search') { session.step = 'AWAITING_GLOBAL_SEARCH'; await sendText(from, '🔍 *What are you looking for?*\\n\\nReply with a restaurant or dish name.'); return; }
+      else { await performGlobalSearch(from, text.replace(/^(search|find)\\s+/i, ''), session); return; }
+    }
+    if (listId === 'nav_search_menu') { session.step = 'AWAITING_MENU_SEARCH'; await sendText(from, '🔍 *Search this Menu*\\n\\nReply with the dish name:'); return; }
+    if (listId === 'service_ride' || listId === 'service_package') { await sendText(from, 'Coming soon! Send *menu* to order food.'); return; }
+
+    // Natural-language food orders: search all open restaurants before asking the customer to choose
+    if (session.step === 'IDLE' && text && !listId && !btnId && !/^(?:hi|hello|start|menu|cancel)$/i.test(textLower)) {
+      await searchRestaurantsForNaturalOrder(from, text, profileName, session);
+      return;
+    }
+
     if (listId === 'service_food' || textLower.includes('food')) { await sendVendorList(from, 0); return; }
     if (listId === 'service_search' || textLower.startsWith('search ') || textLower.startsWith('find ')) {
       if (listId === 'service_search') { session.step = 'AWAITING_GLOBAL_SEARCH'; await sendText(from, '🔍 *What are you looking for?*\n\nReply with a restaurant or dish name.'); return; }
@@ -649,6 +907,53 @@ app.post('/webhook', async (req, res) => {
     }
     if (listId === 'nav_search_menu') { session.step = 'AWAITING_MENU_SEARCH'; await sendText(from, '🔍 *Search this Menu*\n\nReply with the dish name:'); return; }
     if (listId === 'service_ride' || listId === 'service_package') { await sendText(from, 'Coming soon! Send *menu* to order food.'); return; }
+
+    // Select one of the restaurants found for the natural-language order
+    if (listId && listId.startsWith('match_vendor_')) {
+      const vendorId = listId.replace('match_vendor_', '');
+      const pending = session.pendingNaturalOrder;
+      const candidate = session.matchCandidates?.[vendorId];
+      if (!pending || !candidate) {
+        await sendText(from, 'That restaurant selection has expired. Please send your food order again so I can search fresh menus.');
+        session.step = 'IDLE';
+        return;
+      }
+      const { data: vendor } = await supabase.from('vendors').select('id, store_name, phone, is_open').eq('id', vendorId).maybeSingle();
+      if (!vendor || !vendor.is_open) {
+        await sendText(from, 'That restaurant is no longer open. Please send your order again to search other restaurants.');
+        session.step = 'IDLE';
+        return;
+      }
+      const { data: freshMenu, error: freshMenuError } = await supabase.from('menu_items').select('id, name, price, vendor_id, in_stock').eq('vendor_id', vendorId).eq('in_stock', true).limit(1000);
+      if (freshMenuError) { await sendText(from, 'I could not refresh that restaurant menu. Please try again.'); return; }
+      const cart = [];
+      const customItems = [];
+      for (const requested of pending.requestedItems) {
+        const matchItem = findMatchingMenuItem(requested.name, freshMenu || []);
+        if (!matchItem) customItems.push({ name: requested.name, qty: requested.qty, unit: requested.unit });
+        else {
+          const existing = cart.find(item => item.id === matchItem.id);
+          if (existing) existing.qty = Math.min(50, existing.qty + requested.qty);
+          else cart.push({ id: matchItem.id, name: matchItem.name, price: Number(matchItem.price), qty: requested.qty });
+        }
+      }
+      if (!cart.length && !customItems.length) { await sendText(from, 'I could not match those items. Please send your order again with clearer food names.'); return; }
+      if (customItems.length) {
+        const candidateNow = { vendor, cart, customItems };
+        await startVendorCustomQuote(from, pending.profileName || profileName, session, candidateNow);
+        return;
+      }
+      session.vendorId = vendor.id;
+      session.vendorName = vendor.store_name;
+      session.cart = cart;
+      session.customItems = [];
+      session.pendingQuoteToken = null;
+      session.pendingNaturalOrder = null;
+      session.matchCandidates = {};
+      session.step = 'IDLE';
+      await sendCartView(from, session, 'Found *' + vendor.store_name + '* with all your requested items. Review the quantities and food total before checkout.');
+      return;
+    }
 
     // VENDOR PAGINATION
     if (listId && listId.startsWith('vendor_next_')) { await sendVendorList(from, parseInt(listId.replace('vendor_next_', ''), 10)); return; }
