@@ -912,14 +912,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    if (listId === 'service_food' || textLower.includes('food')) { await sendVendorList(from, 0); return; }
-    if (listId === 'service_search' || textLower.startsWith('search ') || textLower.startsWith('find ')) {
-      if (listId === 'service_search') { session.step = 'AWAITING_GLOBAL_SEARCH'; await sendText(from, '🔍 *What are you looking for?*\n\nReply with a restaurant or dish name.'); return; }
-      else { await performGlobalSearch(from, text.replace(/^(search|find)\s+/i, ''), session); return; }
-    }
-    if (listId === 'nav_search_menu') { session.step = 'AWAITING_MENU_SEARCH'; await sendText(from, '🔍 *Search this Menu*\n\nReply with the dish name:'); return; }
-    if (listId === 'service_ride' || listId === 'service_package') { await sendText(from, 'Coming soon! Send *menu* to order food.'); return; }
-
     // Select one of the restaurants found for the natural-language order
     if (listId && listId.startsWith('match_vendor_')) {
       const vendorId = listId.replace('match_vendor_', '');
