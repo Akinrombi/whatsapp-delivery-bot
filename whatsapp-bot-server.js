@@ -453,13 +453,18 @@ function findMatchingMenuItem(requestName, menuItems) {
   const requested = normalizeFoodText(requestName);
   if (!requested) return null;
   const requestTokens = requested.split(' ').filter(Boolean);
+  const allowedModifiers = new Set(['grilled', 'fried', 'roasted', 'boiled', 'smoked', 'spicy', 'peppered', 'assorted', 'fresh', 'bbq', 'barbecue', 'suya', 'cooked', 'steamed', 'hot', 'cold', 'special']);
   const candidates = (menuItems || []).map(item => {
     const normalized = normalizeFoodText(item.name);
     const itemTokens = normalized.split(' ').filter(Boolean);
     let score = 0;
     if (normalized === requested) score = 1000;
-    else if (normalized.includes(requested)) score = 800 - Math.max(0, itemTokens.length - requestTokens.length);
-    else if (requestTokens.every(token => itemTokens.includes(token))) score = 700 - Math.max(0, itemTokens.length - requestTokens.length);
+    else if (requestTokens.every(token => itemTokens.includes(token))) {
+      const extras = itemTokens.filter(token => !requestTokens.includes(token));
+      if (extras.length <= 2 && extras.every(token => allowedModifiers.has(token))) {
+        score = 800 - extras.length;
+      }
+    }
     return { item, score, length: itemTokens.length };
   }).filter(c => c.score > 0).sort((a, b) => b.score - a.score || a.length - b.length);
   return candidates[0]?.item || null;
