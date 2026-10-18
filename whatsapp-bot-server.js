@@ -59,8 +59,24 @@ function resetSession(s) {
   s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null; s.deliveryFee = BASE_FEE; s.distanceKm = 0; s.paymentMethod = 'card';
   s.pendingNaturalOrder = null; s.matchCandidates = {}; s.customItems = []; s.pendingQuoteToken = null;
 }
-const cartTotal = (cart) => cart.reduce((sum, i) => sum + i.price * i.qty, 0);
-const naira = (n) => '₦' + Number(n).toLocaleString();
+const cartTotal = (cart) => cart.reduce((sum, i) => sum + Number(i.price || 0) * Number(i.qty || 0), 0);
+const naira = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 2 });
+
+// Customer-facing service charge and discount are zero for now.
+// The restaurant commission remains separate and is never added to customer checkout.
+function getOrderBreakdown(session) {
+  const foodSubtotal = Math.round(cartTotal(session.cart) * 100) / 100;
+  const deliveryFee = Math.round((Number(session.deliveryFee) || 0) * 100) / 100;
+  const serviceCharge = 0;
+  const discount = 0;
+  const total = Math.max(0, Math.round((foodSubtotal + deliveryFee + serviceCharge - discount) * 100) / 100);
+  return { foodSubtotal, deliveryFee, serviceCharge, discount, total };
+}
+function formatOrderBreakdown(session) {
+  const b = getOrderBreakdown(session);
+  const feeText = session.distanceKm > 0 ? ` (${Number(session.distanceKm).toFixed(1)} km)` : '';
+  return `Food subtotal: ${naira(b.foodSubtotal)}\nDelivery fee: ${naira(b.deliveryFee)}${feeText}\nService charge: ${naira(b.serviceCharge)}\nDiscount: -${naira(b.discount)}\n*Total to pay: ${naira(b.total)}*`;
+}
 
 const seen = new Set();
 function alreadySeen(id) {
@@ -120,7 +136,7 @@ async function completePaidOrder(reference, transaction) {
     .select('id, order_number, customer_phone, total, delivery_fee, delivery_address, notes').maybeSingle();
   if (updateError) throw updateError;
   if (updated?.customer_phone) {
-    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\n\nFood: ${naira(updated.total)}\nDelivery: ${naira(updated.delivery_fee)}\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\n📍 ${updated.delivery_address || ''}${updated.notes ? `\n📝 Note: ${updated.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
+    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\n\nFood subtotal: ${naira(updated.total)}\nDelivery fee: ${naira(updated.delivery_fee)}\nService charge: ${naira(0)}\nDiscount: -${naira(0)}\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\n📍 ${updated.delivery_address || ''}${updated.notes ? `\n📝 Note: ${updated.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
   }
   return updated || order;
 }
@@ -756,9 +772,10 @@ app.post('/webhook', async (req, res) => {
           resetSession(session);
           return;
         }
-        const subtotal = cartTotal(session.cart);
-        const fee = Number(session.deliveryFee) || 0;
-        const amountKobo = Math.round((subtotal + fee) * 100);
+        const breakdown = getOrderBreakdown(session);
+        const subtotal = breakdown.foodSubtotal;
+        const fee = breakdown.deliveryFee;
+        const amountKobo = Math.round(breakdown.total * 100);
         if (!Number.isSafeInteger(amountKobo) || amountKobo < 100) throw new Error('Invalid order amount');
         const pin = crypto.randomInt(1000, 10000).toString();
         const orderNumber = '#' + Date.now().toString().slice(-6);
@@ -783,7 +800,7 @@ app.post('/webhook', async (req, res) => {
             throw new Error('Paystack did not return temporary bank transfer details');
           }
           session.step = 'AWAITING_PAYMENT';
-          await sendText(from, `🧾 *QuickEats Order ${orderNumber}*\nTotal: *${naira(subtotal + fee)}*\n\n🏦 *Pay by bank transfer*\nBank: ${payment.bank.name}\nAccount name: ${payment.account_name || 'Paystack'}\nAccount number: ${payment.account_number}\n\n⏳ This account expires at ${new Date(payment.account_expires_at || expiresAt).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })}.\n\nTransfer the exact amount shown above. Your order will be confirmed automatically after Paystack verifies payment. Do not send a transfer receipt as proof, and never share your PIN or OTP.`);
+          await sendText(from, `🧾 *QuickEats Order ${orderNumber}*\n\n${formatOrderBreakdown(session)}\n\n🏦 *Pay by bank transfer*\nBank: ${payment.bank.name}\nAccount name: ${payment.account_name || 'Paystack'}\nAccount number: ${payment.account_number}\n\n⏳ This account expires at ${new Date(payment.account_expires_at || expiresAt).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })}.\n\nTransfer the exact amount shown above. Your order will be confirmed automatically after Paystack verifies payment. Do not send a transfer receipt as proof, and never share your PIN or OTP.`);
         } else {
           const payment = await paystackRequest('transaction/initialize', {
             email, amount: amountKobo, currency: 'NGN', reference,
@@ -791,7 +808,7 @@ app.post('/webhook', async (req, res) => {
             metadata: { order_id: order.id, order_number: orderNumber, customer_phone: from }
           });
           session.step = 'AWAITING_PAYMENT';
-          await sendText(from, `🧾 Order ${orderNumber} created.\nTotal: ${naira(subtotal + fee)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
+          await sendText(from, `🧾 Order ${orderNumber} created.\n\n${formatOrderBreakdown(session)}\n\nPay securely using this Paystack link:\n${payment.authorization_url}\n\nYour order will only be confirmed after payment is verified. Do not share your delivery PIN.`);
         }
       } catch (error) {
         console.error('Paystack checkout failed:', error.response?.data || error.message);
@@ -884,7 +901,7 @@ app.post('/webhook', async (req, res) => {
        session.note = ''; session.step = 'AWAITING_CONFIRM';
        const sub = cartTotal(session.cart);
        const feeText = session.distanceKm > 0 ? ` (${session.distanceKm.toFixed(1)} km)` : '';
-       await sendButtonMessage(from, `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\nFood: ${naira(sub)}\nDelivery: ${naira(session.deliveryFee)}${feeText}\n*Total: ${naira(sub + session.deliveryFee)}*\n\n📍 ${session.address}\n\n🔒 Pay securely online with Paystack.`,
+       await sendButtonMessage(from, `🧾 *Confirm Your Order*\n\n🏪 ${session.vendorName}\n${cartSummary(session.cart)}\n\n${formatOrderBreakdown(session)}\n\n📍 ${session.address}\n\n🔒 Pay securely online with Paystack.`,
          [{ id: 'btn_confirm', title: '✅ Confirm Order' }, { id: 'btn_cancel', title: '❌ Cancel' }]);
        return;
     }
