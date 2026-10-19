@@ -59,7 +59,7 @@ function resetSession(s) {
   s.activeItemId = null; s.menuPage = 0; s.flowItems = []; s.flowPage = 0; s.lastCategory = null; s.tempLastOrder = null; s.deliveryFee = BASE_FEE; s.distanceKm = 0; s.paymentMethod = 'card';
   s.pendingNaturalOrder = null; s.matchCandidates = {}; s.customItems = []; s.pendingQuoteToken = null;
 }
-const cartTotal = (cart) => cart.reduce((sum, i) => sum + Number(i.price || 0) * Number(i.qty || 0), 0);
+const cartTotal = (cart) => Math.round(cart.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.qty) || 0), 0) * 100) / 100;
 const naira = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 2 });
 
 // Customer-facing service charge and discount are zero for now.
@@ -71,6 +71,21 @@ function getOrderBreakdown(session) {
   const discount = 0;
   const total = Math.max(0, Math.round((foodSubtotal + deliveryFee + serviceCharge - discount) * 100) / 100);
   return { foodSubtotal, deliveryFee, serviceCharge, discount, total };
+}
+async function refreshCartPricesFromSavedMenu(session) {
+  if (!session?.vendorId || !Array.isArray(session.cart) || !session.cart.length) return { missing: [], changed: false };
+  const { data: menuItems, error } = await supabase.from('menu_items')
+    .select('id, name, price, in_stock').eq('vendor_id', session.vendorId).eq('in_stock', true).limit(1000);
+  if (error) throw error;
+  let changed = false;
+  const missing = [];
+  for (const cartItem of session.cart) {
+    const matched = findMatchingMenuItem(cartItem.name, menuItems || []);
+    if (!matched || !Number.isFinite(Number(matched.price)) || Number(matched.price) <= 0) { missing.push(cartItem.name); continue; }
+    if (String(cartItem.id) !== String(matched.id) || Number(cartItem.price) !== Number(matched.price) || cartItem.name !== matched.name || cartItem.custom) changed = true;
+    cartItem.id = matched.id; cartItem.name = matched.name; cartItem.price = Number(matched.price); cartItem.custom = false;
+  }
+  return { missing, changed };
 }
 function formatOrderBreakdown(session) {
   const b = getOrderBreakdown(session);
@@ -763,6 +778,19 @@ app.post('/webhook', async (req, res) => {
       }
       let orderId = null;
       try {
+        const pricing = await refreshCartPricesFromSavedMenu(session);
+        if (pricing.missing.length) {
+          session.step = 'AWAITING_CONFIRM';
+          await sendText(from, '⚠️ I cannot calculate a correct total yet because these items do not have a saved, available menu price: ' + pricing.missing.join(', ') + '. Your order has not been charged. Please ask the QuickEats admin to add the correct prices to this restaurant menu, then confirm checkout again.');
+          await sendCartView(from, session, 'Please review your cart after the saved menu prices are added.');
+          return;
+        }
+        if (pricing.changed) {
+          await sendText(from, 'I refreshed your cart using the restaurant’s current saved menu prices. Please review the updated totals before continuing.');
+          session.step = 'AWAITING_CONFIRM';
+          await sendCartView(from, session);
+          return;
+        }
         const { data: vendor } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
         if (!vendor || !vendor.is_open) {
           await sendText(from, 'The restaurant is no longer open. Send *menu* to choose another restaurant.');
