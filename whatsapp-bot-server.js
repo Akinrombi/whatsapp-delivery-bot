@@ -704,6 +704,17 @@ app.post('/webhook', async (req, res) => {
     const message = value?.messages?.[0];
     if (!message || alreadySeen(message.id)) return;
 
+    // Global QuickEats shutdown: stop WhatsApp ordering while preserving payment callbacks for orders already created.
+    const { data: systemControl, error: systemControlError } = await supabase
+      .from('quickeats_system_control')
+      .select('enabled, shutdown_message')
+      .eq('id', 'global')
+      .maybeSingle();
+    if (systemControlError || !systemControl || systemControl.enabled === false) {
+      await sendText(message.from, systemControl?.shutdown_message || 'QuickEats is temporarily unavailable. Please try again later.');
+      return;
+    }
+
     const from = message.from;
     const profileName = value?.contacts?.[0]?.profile?.name || 'Customer';
     const text = message.text?.body ? message.text.body.trim() : '';
