@@ -450,7 +450,11 @@ function normalizeFoodText(value) {
   return String(value || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-
+function singularFoodToken(token) {
+  if (token.length > 4 && token.endsWith('ies')) return token.slice(0, -3) + 'y';
+  if (token.length > 3 && token.endsWith('s') && !/(ss|us|is)$/.test(token)) return token.slice(0, -1);
+  return token;
+}
 function parseNaturalOrderText(rawText) {
   let text = String(rawText || '').toLowerCase().trim();
   text = text.replace(/^(?:hi|hello|please)\s*[,!:\-]?\s*/i, '');
@@ -458,9 +462,27 @@ function parseNaturalOrderText(rawText) {
   const separators = /[,;]+|\s+\+\s+|\s+and\s+(?=(?:\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b)/i;
   const segments = text.split(separators).map(s => s.trim()).filter(Boolean);
   const items = [];
+  const addItem = (name, qty, unit) => {
+    name = String(name || '').replace(/^(?:of|some)\s+/i, '').replace(/\b(?:please|thanks|thank you)\b/gi, '').trim();
+    if (!name || !/[a-z]/i.test(name)) return;
+    qty = Math.max(1, Math.min(50, Number(qty) || 1));
+    const normalized = normalizeFoodText(name);
+    const existing = items.find(i => normalizeFoodText(i.name) === normalized);
+    if (existing) existing.qty = Math.min(50, existing.qty + qty);
+    else items.push({ name, normalized, qty, unit: unit || null });
+  };
+  const quantityPattern = '(\\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
   for (const segment of segments) {
     let part = segment.replace(/^(?:please|also|and)\s+/i, '').trim();
-    const qtyMatch = part.match(/^(\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b\s*(?:(pieces?|pcs?|plates?|portions?|servings?)\s+(?:of\s+)?)?/i);
+    // Support both "5 meat" and "meat 5 rice" (five meat plus one rice).
+    const trailingQty = new RegExp('^(.+?)\\s+' + quantityPattern + '\\s+(.+)$', 'i').exec(part);
+    if (trailingQty) {
+      const qty = Number(trailingQty[2]) || NUMBER_WORDS[trailingQty[2]] || 1;
+      addItem(trailingQty[1], qty, null);
+      addItem(trailingQty[3], 1, null);
+      continue;
+    }
+    const qtyMatch = part.match(new RegExp('^' + quantityPattern + '\\b\\s*(?:(pieces?|pcs?|plates?|portions?|servings?)\\s+(?:of\\s+)?)?', 'i'));
     let qty = 1;
     let unit = null;
     if (qtyMatch) {
@@ -468,36 +490,28 @@ function parseNaturalOrderText(rawText) {
       if (qtyMatch[2]) unit = /^piece|^pc/i.test(qtyMatch[2]) ? 'piece' : 'plate';
       part = part.slice(qtyMatch[0].length).trim();
     }
-    part = part.replace(/^(?:of|some)\s+/i, '').replace(/\b(?:please|thanks|thank you)\b/gi, '').trim();
     part = part.replace(/^(?:pieces?|pcs?|plates?|portions?|servings?)\s+of\s+/i, '').trim();
-    if (!part || !/[a-z]/i.test(part)) continue;
-    qty = Math.max(1, Math.min(50, Number(qty) || 1));
-    const normalized = normalizeFoodText(part);
-    const existing = items.find(i => normalizeFoodText(i.name) === normalized);
-    if (existing) existing.qty = Math.min(50, existing.qty + qty);
-    else items.push({ name: part, normalized, qty, unit });
+    addItem(part, qty, unit);
   }
   return items;
 }
-
 function findMatchingMenuItem(requestName, menuItems) {
   const requested = normalizeFoodText(requestName);
   if (!requested) return null;
-  const requestTokens = requested.split(' ').filter(Boolean);
-  const allowedModifiers = new Set(['grilled', 'fried', 'roasted', 'boiled', 'smoked', 'spicy', 'peppered', 'assorted', 'fresh', 'bbq', 'barbecue', 'suya', 'cooked', 'steamed', 'hot', 'cold', 'special']);
+  const requestTokens = requested.split(' ').filter(Boolean).map(singularFoodToken);
   const candidates = (menuItems || []).map(item => {
     const normalized = normalizeFoodText(item.name);
-    const itemTokens = normalized.split(' ').filter(Boolean);
+    const itemTokens = normalized.split(' ').filter(Boolean).map(singularFoodToken);
     let score = 0;
     if (normalized === requested) score = 1000;
+    else if (itemTokens.join(' ') === requestTokens.join(' ')) score = 950;
     else if (requestTokens.every(token => itemTokens.includes(token))) {
       const extras = itemTokens.filter(token => !requestTokens.includes(token));
-      if (extras.length <= 2 && extras.every(token => allowedModifiers.has(token))) {
-        score = 800 - extras.length;
-      }
+      const allowedModifiers = new Set(['grilled', 'fried', 'roasted', 'boiled', 'smoked', 'spicy', 'peppered', 'assorted', 'fresh', 'bbq', 'barbecue', 'suya', 'cooked', 'steamed', 'hot', 'cold', 'special']);
+      if (extras.length <= 2 && extras.every(token => allowedModifiers.has(token))) score = 800 - extras.length;
     }
     return { item, score, length: itemTokens.length };
-  }).filter(c => c.score > 0).sort((a, b) => b.score - a.score || a.length - b.length);
+  }).filter(candidate => candidate.score > 0).sort((a, b) => b.score - a.score || a.length - b.length);
   return candidates[0]?.item || null;
 }
 
