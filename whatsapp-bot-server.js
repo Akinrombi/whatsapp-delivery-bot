@@ -924,22 +924,55 @@ app.post('/webhook', async (req, res) => {
          return; // If no location or text yet, do nothing and wait
       }
 
-      // Calculate fee if we have coordinates
-      if (customerLat && customerLng) {
-        const { data: v } = await supabase.from('vendors').select('latitude, longitude').eq('id', session.vendorId).maybeSingle();
-        if (v && v.latitude && v.longitude) {
-           const dist = calculateDistance(customerLat, customerLng, Number(v.latitude), Number(v.longitude));
-           session.distanceKm = dist;
-           session.deliveryFee = calculateDeliveryFee(dist);
-           await sendText(from, `📍 Distance calculated: *${dist.toFixed(1)} km*\nDelivery fee: *${naira(session.deliveryFee)}*`);
-        } else {
-           session.distanceKm = 0; session.deliveryFee = BASE_FEE;
+      // Calculate the fee from the customer's pin and the restaurant's saved pin.
+      // The Vendor dashboard saves coordinates in lat/lng; older rows may use latitude/longitude.
+      const hasCustomerPin = customerLat !== null && customerLat !== undefined &&
+        customerLng !== null && customerLng !== undefined &&
+        Number.isFinite(Number(customerLat)) && Number.isFinite(Number(customerLng)) &&
+        Math.abs(Number(customerLat)) <= 90 && Math.abs(Number(customerLng)) <= 180;
+
+      if (hasCustomerPin) {
+        const { data: v, error: vendorLocationError } = await supabase
+          .from('vendors')
+          .select('lat, lng, latitude, longitude')
+          .eq('id', session.vendorId)
+          .maybeSingle();
+
+        if (vendorLocationError) {
+          console.error('Could not load restaurant coordinates for delivery fee:', vendorLocationError.message);
+          await sendText(from, 'I received your location, but could not load the restaurant location to calculate delivery. Please try again shortly.');
+          return;
         }
+
+        const vendorLat = v?.lat ?? v?.latitude;
+        const vendorLng = v?.lng ?? v?.longitude;
+        const hasVendorPin = vendorLat !== null && vendorLat !== undefined &&
+          vendorLng !== null && vendorLng !== undefined &&
+          Number.isFinite(Number(vendorLat)) && Number.isFinite(Number(vendorLng)) &&
+          Math.abs(Number(vendorLat)) <= 90 && Math.abs(Number(vendorLng)) <= 180 &&
+          !(Number(vendorLat) === 0 && Number(vendorLng) === 0);
+
+        if (!hasVendorPin) {
+          session.distanceKm = 0;
+          await sendText(from, '📍 I received your location, but this restaurant has not saved its map pin yet, so I cannot calculate the correct distance-based delivery fee. The restaurant must open Vendor Dashboard → Restaurant, tap Capture GPS Location, then Save Restaurant. After that, please send your location pin again. Your order has not been confirmed.');
+          return;
+        }
+
+        const dist = calculateDistance(
+          Number(customerLat), Number(customerLng), Number(vendorLat), Number(vendorLng)
+        );
+        session.distanceKm = dist;
+        session.deliveryFee = calculateDeliveryFee(dist);
+        await sendText(from, `📍 Distance calculated: *${dist.toFixed(1)} km*\\nDelivery fee: *${naira(session.deliveryFee)}*`);
       } else {
-         session.distanceKm = 0; session.deliveryFee = BASE_FEE;
+        // A typed address has no coordinates, so distance cannot be verified.
+        // Keep the existing disclosed base-fee fallback for address-only orders.
+        session.distanceKm = 0;
+        session.deliveryFee = BASE_FEE;
+        await sendText(from, 'I could not calculate the distance from a typed address. The base delivery fee of ₦1,000 will apply unless you share a WhatsApp location pin.');
       }
 
-      // Now that we have the location, move to the note step
+            // Now that we have the location, move to the note step
       session.step = 'AWAITING_NOTE_PROMPT';
       await sendButtonMessage(from, 'Do you have any special instructions for the restaurant?', [{ id: 'btn_add_note', title: '📝 Add Note' }, { id: 'btn_skip_note', title: '⏭️ Skip' }]);
       return;
