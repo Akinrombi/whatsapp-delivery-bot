@@ -963,7 +963,7 @@ app.post('/webhook', async (req, res) => {
         );
         session.distanceKm = dist;
         session.deliveryFee = calculateDeliveryFee(dist);
-        await sendText(from, `📍 Distance calculated: *${dist.toFixed(1)} km*\\nDelivery fee: *${naira(session.deliveryFee)}*`);
+        await sendText(from, `📍 Distance calculated: *${dist.toFixed(1)} km*\nDelivery fee: *${naira(session.deliveryFee)}*`);
       } else {
         // A typed address has no coordinates, so distance cannot be verified.
         // Keep the existing disclosed base-fee fallback for address-only orders.
