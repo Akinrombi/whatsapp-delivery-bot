@@ -136,24 +136,28 @@ async function completePaidOrder(reference, transaction) {
   if (!transaction || transaction.status !== 'success' || transaction.reference !== reference || transaction.currency !== 'NGN') {
     throw new Error('Paystack transaction details did not pass validation');
   }
+  if (!Number.isSafeInteger(Number(transaction.amount)) || Number(transaction.amount) < 1) {
+    throw new Error('Paystack amount is invalid');
+  }
+
+  // Atomic database RPC verifies the amount again and credits vendor/platform ledgers once.
+  // Both callback and webhook can call this safely; the database serializes concurrent attempts.
+  const { data: processed, error: processError } = await supabase.rpc('process_quickeats_paid_order', {
+    p_reference: reference,
+    p_amount_kobo: Number(transaction.amount)
+  });
+  if (processError) throw processError;
+
   const { data: order, error: findError } = await supabase.from('orders')
     .select('id, order_number, total, delivery_fee, payment_status, payment_reference, customer_phone, delivery_code, delivery_address, notes')
     .eq('payment_reference', reference).maybeSingle();
-  if (findError || !order) throw new Error('No order found for payment reference');
-  const expectedKobo = Math.round((Number(order.total) + Number(order.delivery_fee || 0)) * 100);
-  if (!Number.isSafeInteger(expectedKobo) || Number(transaction.amount) !== expectedKobo) {
-    throw new Error('Paid amount does not match the order total');
+  if (findError || !order || order.payment_status !== 'paid') throw new Error('Paid order could not be reloaded after ledger processing');
+
+  // Only send the confirmation for the first successful ledger processing.
+  if (!processed?.already_processed && order.customer_phone) {
+    await sendText(order.customer_phone, `✅ *Payment successful!* Order ${order.order_number} is now confirmed.\n\nFood subtotal: ${naira(order.total)}\nDelivery fee: ${naira(order.delivery_fee)}\nService charge: ${naira(0)}\nDiscount: -${naira(0)}\n*Total paid: ${naira(Number(order.total) + Number(order.delivery_fee || 0))}*\n📍 ${order.delivery_address || ''}${order.notes ? `\n📝 Note: ${order.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
   }
-  if (order.payment_status === 'paid') return order;
-  const { data: updated, error: updateError } = await supabase.from('orders')
-    .update({ payment_status: 'paid', payment_paid_at: new Date().toISOString(), status: 'new', wa_pending: false })
-    .eq('id', order.id).neq('payment_status', 'paid')
-    .select('id, order_number, customer_phone, total, delivery_fee, delivery_address, notes').maybeSingle();
-  if (updateError) throw updateError;
-  if (updated?.customer_phone) {
-    await sendText(updated.customer_phone, `✅ *Payment successful!* Order ${updated.order_number} is now confirmed.\n\nFood subtotal: ${naira(updated.total)}\nDelivery fee: ${naira(updated.delivery_fee)}\nService charge: ${naira(0)}\nDiscount: -${naira(0)}\n*Total paid: ${naira(Number(updated.total) + Number(updated.delivery_fee || 0))}*\n📍 ${updated.delivery_address || ''}${updated.notes ? `\n📝 Note: ${updated.notes}` : ''}\n\nYour delivery PIN will be shared when your rider is on the way.`);
-  }
-  return updated || order;
+  return order;
 }
 
 app.get('/paystack/callback', async (req, res) => {
