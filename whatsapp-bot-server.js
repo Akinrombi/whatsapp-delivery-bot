@@ -180,17 +180,22 @@ app.post('/paystack/webhook', async (req, res) => {
   const a = Buffer.from(String(signature));
   const b = Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
-  res.sendStatus(200);
+
   try {
-    if (req.body?.event === 'charge.success' && req.body.data?.reference) {
-      const reference = req.body.data.reference;
-      const transaction = req.body.data?.channel === 'bank_transfer'
-        ? await verifyPaystackCharge(reference)
-        : await verifyPaystackReference(reference);
-      await completePaidOrder(reference, transaction);
+    // Ignore unrelated, validly signed Paystack events.
+    if (req.body?.event !== 'charge.success' || !req.body.data?.reference) {
+      return res.sendStatus(200);
     }
+    const reference = req.body.data.reference;
+    const transaction = req.body.data?.channel === 'bank_transfer'
+      ? await verifyPaystackCharge(reference)
+      : await verifyPaystackReference(reference);
+    await completePaidOrder(reference, transaction);
+    return res.sendStatus(200);
   } catch (error) {
+    // Non-2xx asks Paystack to retry. Processing is idempotent in the database.
     console.error('Paystack webhook processing failed:', error.response?.data || error.message);
+    return res.status(500).send('Payment event processing failed; retry required.');
   }
 });
 
