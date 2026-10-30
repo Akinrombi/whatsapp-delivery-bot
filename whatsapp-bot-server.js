@@ -239,11 +239,11 @@ function sendList(to, header, body, button, sectionTitle, rows) {
 
 
 /* ---------- AUTHENTICATED RIDER DELIVERY-CODE RESEND ---------- */
-const RIDER_APP_ORIGIN = process.env.RIDER_APP_ORIGIN || 'https://partner-app-5l9f.onrender.com';
+const RIDER_APP_ORIGIN = (process.env.RIDER_APP_ORIGIN || 'https://partner-app-5l9f.onrender.com').replace(/\\/$/, '');
 
 function setRiderApiCors(req, res) {
   const origin = req.headers.origin;
-  if (origin === RIDER_APP_ORIGIN) {
+  if (origin && origin.replace(/\\/$/, '') === RIDER_APP_ORIGIN) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
@@ -259,7 +259,8 @@ app.options('/api/rider/resend-delivery-code', (req, res) => {
 
 app.post('/api/rider/resend-delivery-code', async (req, res) => {
   setRiderApiCors(req, res);
-  if (req.headers.origin && req.headers.origin !== RIDER_APP_ORIGIN) {
+  if (req.headers.origin && req.headers.origin.replace(/\\/$/, '') !== RIDER_APP_ORIGIN) {
+    console.warn('Rider delivery-code resend rejected for unexpected origin:', req.headers.origin);
     return res.status(403).json({ success: false, message: 'This app is not allowed to use this service.' });
   }
 
