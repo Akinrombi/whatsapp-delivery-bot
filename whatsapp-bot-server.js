@@ -12,7 +12,9 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_ID || '';
 const WHATSAPP_GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION || 'v26.0';
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
+let missingMetaSecretWarningShown = false;
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 
@@ -726,6 +728,21 @@ function sendEditCartList(to, session) {
 
 // ---------- WEBHOOK ----------
 app.post('/webhook', async (req, res) => {
+  // Verify Meta's SHA-256 signature when the app secret is configured in Render.
+  if (META_APP_SECRET) {
+    const signature = String(req.headers['x-hub-signature-256'] || '');
+    const expected = 'sha256=' + crypto.createHmac('sha256', META_APP_SECRET)
+      .update(req.rawBody || Buffer.alloc(0)).digest('hex');
+    const receivedBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    if (receivedBuffer.length !== expectedBuffer.length ||
+        !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+      return res.sendStatus(401);
+    }
+  } else if (!missingMetaSecretWarningShown) {
+    missingMetaSecretWarningShown = true;
+    console.warn('META_APP_SECRET is not configured; WhatsApp webhook signature validation is disabled.');
+  }
   res.sendStatus(200);
   let activeSessionPhone = null;
   try {
