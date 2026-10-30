@@ -9,6 +9,7 @@ Customer ordering runs through WhatsApp. The bot connects to the shared Supabase
 - `WHATSAPP_TOKEN` — WhatsApp Cloud API access token.
 - `PHONE_NUMBER_ID` — WhatsApp sender phone-number ID. The server also accepts the legacy `WHATSAPP_PHONE_ID` name.
 - `WHATSAPP_GRAPH_API_VERSION` — Graph API version; default is `v26.0`.
+- `META_APP_SECRET` — Meta app secret used to verify `X-Hub-Signature-256` on incoming WhatsApp webhooks. Set this before production. The server logs a warning and accepts unsigned webhooks if it is missing.
 - `VERIFY_TOKEN` — private string configured to match the Meta webhook verification setting.
 - `PAYSTACK_SECRET_KEY` — Paystack secret key for checkout and webhook verification.
 - `PUBLIC_BASE_URL` — public Render URL used for payment callbacks.
