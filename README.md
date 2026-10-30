@@ -1,56 +1,53 @@
-# WhatsApp Delivery Bot
+# QuickEats WhatsApp Ordering Bot
 
-A WhatsApp ordering bot for a multi-service delivery platform (food, grocery, package, ride). Customers order entirely through WhatsApp; finished orders get pushed to your vendor/rider backend.
+Customer ordering runs through WhatsApp. The bot connects to the shared Supabase project, matches requested foods against vendor menus, creates orders, starts Paystack checkout, verifies payment callbacks, and sends order-status updates to customers. Rider and Vendor operations are handled by their separate apps.
 
-## 1. Get WhatsApp Cloud API access (free)
+## Required Render environment variables
 
-1. Create a Meta developer account at developers.facebook.com
-2. Create a new App → add the "WhatsApp" product
-3. In WhatsApp → API Setup, you'll get a temporary access token and a phone number ID (Meta gives you a free test number to start)
-4. Note both values — you'll need them below
+- `SUPABASE_URL` — QuickEats Supabase project URL.
+- `SUPABASE_SERVICE_KEY` — Supabase service-role key. Keep this only in Render secrets; never put it in browser code or commit it.
+- `WHATSAPP_TOKEN` — WhatsApp Cloud API access token.
+- `PHONE_NUMBER_ID` — WhatsApp sender phone-number ID. The server also accepts the legacy `WHATSAPP_PHONE_ID` name.
+- `WHATSAPP_GRAPH_API_VERSION` — Graph API version; default is `v26.0`.
+- `VERIFY_TOKEN` — private string configured to match the Meta webhook verification setting.
+- `PAYSTACK_SECRET_KEY` — Paystack secret key for checkout and webhook verification.
+- `PUBLIC_BASE_URL` — public Render URL used for payment callbacks.
+- `RIDER_APP_ORIGIN` — allowed Rider app origin for the authenticated delivery-code resend endpoint.
+- `FLOW_ID` — optional WhatsApp Flow ID.
+- `FLOW_MODE` — optional WhatsApp Flow mode; defaults to `published`.
+- `PORT` — supplied by Render automatically.
 
-## 2. Set up locally (optional, to test before deploying)
+Copy `.env.example` for local development, then fill in real values locally. Never commit `.env` or share service-role keys and access tokens.
 
-```
+## Local development
+
+```bash
 npm install
-cp .env.example .env
-```
-
-Fill in `.env` with your real values, then:
-
-```
 npm start
 ```
 
-## 3. Push to GitHub
+## Render deployment
 
-Upload all files in this folder to a new GitHub repository. `.gitignore` already excludes `node_modules/` and `.env`, so your secrets won't be committed.
+Use the existing Render Web Service connected to this repository. Keep the existing start command and configure the environment variables above in the Render service settings. Deploy from the `main` branch.
 
-## 4. Deploy (using Render.com as an example)
+## Meta webhook
 
-1. render.com → New → Web Service → connect your GitHub repo
-2. Build command: `npm install`
-3. Start command: `npm start`
-4. Under Environment, add:
-   - `WHATSAPP_TOKEN`
-   - `WHATSAPP_PHONE_ID`
-   - `VERIFY_TOKEN` (make up any string)
-   - `ORDERS_API_URL` (your backend's order-creation endpoint)
-5. Deploy — Render gives you a URL like `https://your-app.onrender.com`
+Configure the WhatsApp webhook callback as:
 
-## 5. Connect the webhook in Meta
+```
+https://YOUR_RENDER_SERVICE.onrender.com/webhook
+```
 
-In Meta's App Dashboard → WhatsApp → Configuration → Webhook:
-- Callback URL: `https://your-app.onrender.com/webhook`
-- Verify token: must match `VERIFY_TOKEN` from step 4
-- Subscribe to the `messages` field
+Use the same `VERIFY_TOKEN` value in Meta and Render, and subscribe to the `messages` field.
 
-## 6. Test it
+## Important launch checks
 
-Message your WhatsApp test number from your phone. You should get the "What would you like to do today?" menu.
+- Verify that the WhatsApp number is a production business number and that the access token is a long-lived system-user token.
+- Use a live Paystack key only when the business is ready to accept real payments; keep test credentials for controlled testing.
+- Configure and test Meta webhook signature verification before public launch.
+- Confirm that the Render service is on an always-on plan suitable for live order processing. The bot currently keeps conversational state in process memory, so restarts can interrupt unfinished conversations; durable session storage is still required before scaling to multiple instances.
+- Test a complete WhatsApp order, Paystack verification, vendor acceptance, rider assignment, delivery PIN verification, and customer status notifications using controlled test accounts.
 
-## Next steps not yet built
+## Current implementation notes
 
-- Payment integration (Paystack/Flutterwave) — marked with a `TODO` in the code
-- Nearest-rider matching logic — currently all orders land in one shared queue
-- A real `ORDERS_API_URL` backend — right now this just needs to exist and accept a POST with the order JSON
+The server contains menu matching for saved vendor items, custom-item quote handling, customer checkout breakdowns, Paystack payment verification, rider assignment integration, and customer status notifications. The README should be kept aligned with the deployed code whenever those flows change.
