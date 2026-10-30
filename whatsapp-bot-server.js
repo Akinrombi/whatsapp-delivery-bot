@@ -320,7 +320,18 @@ app.post('/api/rider/resend-delivery-code', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Could not start the resend. Please try again.' });
     }
 
-    const customerPhone = String(order.customer_phone).replace(/[^0-9]/g, '');
+    // Meta WhatsApp Cloud API expects an international number without a plus sign.
+    // Convert common Nigerian local formats (080..., 80...) to 23480...
+    let customerPhone = String(order.customer_phone || '').trim().replace(/[^0-9]/g, '');
+    if (customerPhone.startsWith('0') && customerPhone.length === 11) {
+      customerPhone = '234' + customerPhone.slice(1);
+    } else if (customerPhone.length === 10) {
+      customerPhone = '234' + customerPhone;
+    }
+    if (!/^\\d{8,15}$/.test(customerPhone)) {
+      return res.status(409).json({ success: false, message: 'The customer phone number is not in a valid WhatsApp format. Update the customer number before resending.' });
+    }
+
     const message = `🔐 *QuickEats delivery verification code*\n\nYour code for order ${order.order_number} is: *${order.delivery_code}*\n\nPlease share this code only with your assigned QuickEats rider when your order arrives.`;
     const sent = await sendText(customerPhone, message);
     if (!sent) {
