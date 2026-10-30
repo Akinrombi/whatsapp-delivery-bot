@@ -727,6 +727,7 @@ function sendEditCartList(to, session) {
 // ---------- WEBHOOK ----------
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
+  let activeSessionPhone = null;
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
@@ -744,6 +745,22 @@ app.post('/webhook', async (req, res) => {
     }
 
     const from = message.from;
+    activeSessionPhone = from;
+    // Restore the customer's conversation after a free Render restart/sleep.
+    const { data: savedSession, error: savedSessionError } = await supabase
+      .from('whatsapp_sessions')
+      .select('session, expires_at')
+      .eq('phone', from)
+      .maybeSingle();
+    if (savedSessionError) {
+      console.error('Could not restore WhatsApp session:', savedSessionError.message);
+    } else if (savedSession && new Date(savedSession.expires_at).getTime() > Date.now()
+      && savedSession.session && typeof savedSession.session === 'object') {
+      sessions[from] = savedSession.session;
+    } else if (savedSession) {
+      await supabase.from('whatsapp_sessions').delete().eq('phone', from);
+      delete sessions[from];
+    }
     const profileName = value?.contacts?.[0]?.profile?.name || 'Customer';
     const text = message.text?.body ? message.text.body.trim() : '';
     const textLower = text.toLowerCase();
@@ -1200,6 +1217,21 @@ app.post('/webhook', async (req, res) => {
 
   } catch (err) {
     console.error('❌ Webhook error:', err.message);
+  } finally {
+    // Persist only the conversation state, never credentials or payment secrets.
+    if (activeSessionPhone && sessions[activeSessionPhone]) {
+      try {
+        const { error } = await supabase.from('whatsapp_sessions').upsert({
+          phone: activeSessionPhone,
+          session: sessions[activeSessionPhone],
+          updated_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        }, { onConflict: 'phone' });
+        if (error) console.error('Could not persist WhatsApp session:', error.message);
+      } catch (sessionError) {
+        console.error('WhatsApp session persistence failed:', sessionError.message);
+      }
+    }
   }
 });
 
