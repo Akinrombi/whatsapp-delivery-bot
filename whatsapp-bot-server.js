@@ -10,7 +10,8 @@ app.use(express.json({ verify: (req, res, buf) => { req.rawBody = Buffer.from(bu
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_ID || '';
+const WHATSAPP_GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION || 'v26.0';
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_verify_token';
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
@@ -211,7 +212,7 @@ app.get('/webhook', (req, res) => {
 async function sendWhatsAppMessage(to, payload) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`,
       payload,
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
     );
@@ -1223,8 +1224,17 @@ async function notifyCustomers() {
     if (error) return;
     for (const o of orders || []) {
       const msg = statusMessage(o);
-      if (msg && o.customer_phone) await sendText(o.customer_phone, msg);
-      await supabase.from('orders').update({ wa_pending: false }).eq('id', o.id);
+      if (msg && o.customer_phone) {
+        const sent = await sendText(o.customer_phone, msg);
+        // Keep the notification pending when Meta rejects the send so the next
+        // polling pass can retry instead of silently losing the customer update.
+        if (!sent) continue;
+      }
+      const { error: clearError } = await supabase
+        .from('orders')
+        .update({ wa_pending: false })
+        .eq('id', o.id);
+      if (clearError) console.error('Could not clear WhatsApp notification flag:', clearError.message);
     }
   } catch (e) { console.error(e.message); } finally { notifying = false; }
 }
