@@ -51,6 +51,10 @@ function calculateDeliveryFee(distanceKm) {
 
 // ---------- SESSIONS ----------
 const sessions = {};
+function isMenuItemAvailable(item) {
+  return Boolean(item?.in_stock) &&
+    (!item.stock_pause_until || new Date(item.stock_pause_until).getTime() <= Date.now());
+}
 function getSession(phone) {
   if (!sessions[phone]) sessions[phone] = { cart: [], step: 'IDLE', vendorId: null, vendorName: '', address: '', note: '', activeItemId: null, menuPage: 0, flowItems: [], flowPage: 0, lastCategory: null, tempLastOrder: null, deliveryFee: BASE_FEE, distanceKm: 0, paymentMethod: 'card', pendingNaturalOrder: null, matchCandidates: {}, customItems: [], pendingQuoteToken: null };
   return sessions[phone];
@@ -76,7 +80,7 @@ function getOrderBreakdown(session) {
 async function refreshCartPricesFromSavedMenu(session) {
   if (!session?.vendorId || !Array.isArray(session.cart) || !session.cart.length) return { missing: [], changed: false };
   const { data: menuItems, error } = await supabase.from('menu_items')
-    .select('id, name, price, in_stock').eq('vendor_id', session.vendorId).eq('in_stock', true).limit(1000);
+    .select('id, name, price, in_stock').eq('vendor_id', session.vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).limit(1000);
   if (error) throw error;
   let changed = false;
   const missing = [];
@@ -360,7 +364,7 @@ async function sendVendorList(to, page = 0, note = '') {
 
 async function sendMenuList(to, vendorId, page = 0, note = '', category = null) {
   const session = getSession(to);
-  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true);
+  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString());
   if (category && category !== 'all') query = query.eq('category', category);
   const { data: all, error } = await query.order('created_at', { ascending: true }).limit(200);
   if (error || !all || all.length === 0) { await sendText(to, 'No available menu items.'); return; }
@@ -405,7 +409,7 @@ async function sendMenuList(to, vendorId, page = 0, note = '', category = null) 
 
 async function sendMenuFlow(to, vendorId, page = 0, note = '', category = null) {
   const session = getSession(to);
-  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true);
+  let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString());
   if (category && category !== 'all') query = query.eq('category', category);
   const { data: all, error } = await query.order('created_at', { ascending: true }).limit(200);
   if (error || !all || all.length === 0) { await sendText(to, 'No available items.'); return; }
@@ -442,7 +446,7 @@ async function performGlobalSearch(to, query, session) {
   const q = `%${query.trim()}%`;
   const [vRes, iRes] = await Promise.all([
     supabase.from('vendors').select('id, store_name, address').ilike('store_name', q).eq('is_open', true).limit(6),
-    supabase.from('menu_items').select('id, name, price, vendor_id, vendors(store_name)').ilike('name', q).eq('in_stock', true).limit(6)
+    supabase.from('menu_items').select('id, name, price, vendor_id, vendors(store_name)').ilike('name', q).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).limit(6)
   ]);
   const vendors = vRes.data || []; const items = iRes.data || [];
   if (vendors.length === 0 && items.length === 0) { await sendText(to, `❌ No results for "*${query}*".`); return; }
@@ -548,7 +552,7 @@ async function searchRestaurantsForNaturalOrder(to, rawText, profileName, sessio
   const vendorIds = vendors.map(v => v.id);
   const { data: menuItems, error: menuError } = await supabase.from('menu_items')
     .select('id, name, price, vendor_id, in_stock, category')
-    .in('vendor_id', vendorIds).eq('in_stock', true).limit(3000);
+    .in('vendor_id', vendorIds).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).limit(3000);
   if (menuError) {
     console.error('Natural order menu search failed:', menuError.message);
     await sendText(to, 'Sorry, I could not search restaurant menus right now. Please try again shortly.');
@@ -754,14 +758,14 @@ app.post('/webhook', async (req, res) => {
       let answers = {}; try { answers = JSON.parse(message.interactive.nfm_reply.response_json || '{}'); } catch (e) {}
       if (!session.vendorId || !session.flowItems.length) { await sendText(from, 'Session expired. Send *menu*.'); return; }
       const ids = session.flowItems.map(i => i.id);
-      const { data: fresh } = await supabase.from('menu_items').select('id, name, price, in_stock').in('id', ids);
+      const { data: fresh } = await supabase.from('menu_items').select('id, name, price, in_stock, stock_pause_until').in('id', ids);
       const freshById = {}; (fresh || []).forEach(f => { freshById[f.id] = f; });
       const added = [], skipped = [];
       session.flowItems.forEach((it, idx) => {
         const q = Math.min(parseInt(answers['q' + (idx + 1)], 10) || 0, 20);
         if (q <= 0) return;
         const f = freshById[it.id];
-        if (!f || !f.in_stock) { skipped.push(it.name); return; }
+        if (!isMenuItemAvailable(f)) { skipped.push(it.name); return; }
         let entry = session.cart.find(c => c.id === f.id);
         if (entry) entry.qty = Math.min(entry.qty + q, 20);
         else session.cart.push({ id: f.id, name: f.name, price: Number(f.price), qty: q });
@@ -902,9 +906,9 @@ app.post('/webhook', async (req, res) => {
        session.vendorId = v.id; session.vendorName = v.store_name;
        const itemIds = lastOrder.items.map(i => i.id).filter(id => id);
        if (itemIds.length > 0) {
-          const { data: freshItems } = await supabase.from('menu_items').select('id, name, price, in_stock').in('id', itemIds);
+          const { data: freshItems } = await supabase.from('menu_items').select('id, name, price, in_stock, stock_pause_until').in('id', itemIds);
           const freshMap = {}; (freshItems || []).forEach(f => { freshMap[f.id] = f; });
-          session.cart = lastOrder.items.map(i => { const f = freshMap[i.id]; return (f && f.in_stock) ? { id: f.id, name: f.name, price: Number(f.price), qty: i.qty } : null; }).filter(i => i !== null);
+          session.cart = lastOrder.items.map(i => { const f = freshMap[i.id]; return isMenuItemAvailable(f) ? { id: f.id, name: f.name, price: Number(f.price), qty: i.qty } : null; }).filter(i => i !== null);
        } else { session.cart = []; }
        if (session.cart.length === 0) { await sendText(from, 'Items unavailable. Browse menu.'); await sendMenu(from, v.id, 0); return; }
        await sendCartView(from, session, 'Here is your previous order:');
@@ -1012,7 +1016,7 @@ app.post('/webhook', async (req, res) => {
     if (session.step === 'AWAITING_MENU_SEARCH' && text && !listId && !btnId) {
       if (!session.vendorId) { await sendText(from, 'Session expired.'); return; }
       session.step = 'IDLE';
-      const { data: items } = await supabase.from('menu_items').select('id, name, price').ilike('name', `%${text.trim()}%`).eq('vendor_id', session.vendorId).eq('in_stock', true).limit(10);
+      const { data: items } = await supabase.from('menu_items').select('id, name, price').ilike('name', `%${text.trim()}%`).eq('vendor_id', session.vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).limit(10);
       if (!items || items.length === 0) { await sendText(from, `❌ No dishes found matching "*${text}*".`); return; }
       await sendList(from, 'Search Results', `Found ${items.length} match(es)`, 'View Items', 'Matches', items.map(it => ({ id: `item_${it.id}`, title: `${it.name} - ${naira(it.price)}`.substring(0, 24), description: 'Tap to add to cart' })));
       return;
@@ -1049,7 +1053,7 @@ app.post('/webhook', async (req, res) => {
         session.step = 'IDLE';
         return;
       }
-      const { data: freshMenu, error: freshMenuError } = await supabase.from('menu_items').select('id, name, price, vendor_id, in_stock').eq('vendor_id', vendorId).eq('in_stock', true).limit(1000);
+      const { data: freshMenu, error: freshMenuError } = await supabase.from('menu_items').select('id, name, price, vendor_id, in_stock').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).limit(1000);
       if (freshMenuError) { await sendText(from, 'I could not refresh that restaurant menu. Please try again.'); return; }
       const cart = [];
       const customItems = [];
@@ -1090,7 +1094,7 @@ app.post('/webhook', async (req, res) => {
       const { data: v } = await supabase.from('vendors').select('id, store_name, is_open').eq('id', vendorId).maybeSingle();
       if (!v || !v.is_open) { await sendText(from, 'Restaurant closed.'); return; }
       session.vendorId = v.id; session.vendorName = v.store_name; session.cart = []; session.menuPage = 0; session.lastCategory = null;
-      const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', vendorId).eq('in_stock', true).not('category', 'is', null);
+      const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).not('category', 'is', null);
       const uniqueCats = [...new Set((cats || []).map(c => c.category))].filter(c => c && c.trim() !== '');
       if (uniqueCats.length > 0) {
          const catRows = uniqueCats.map(c => ({ id: `cat_${c}`, title: c.substring(0, 24), description: `View ${c}` }));
@@ -1101,7 +1105,7 @@ app.post('/webhook', async (req, res) => {
     }
     if (listId && listId.startsWith('cat_')) { session.lastCategory = listId.replace('cat_', ''); await sendMenu(from, session.vendorId, 0, '', session.lastCategory); return; }
     if (listId === 'nav_categories') {
-       const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', session.vendorId).eq('in_stock', true).not('category', 'is', null);
+       const { data: cats } = await supabase.from('menu_items').select('category').eq('vendor_id', session.vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString()).not('category', 'is', null);
        const uniqueCats = [...new Set((cats || []).map(c => c.category))].filter(c => c && c.trim() !== '');
        const catRows = uniqueCats.map(c => ({ id: `cat_${c}`, title: c.substring(0, 24), description: `View ${c}` }));
        catRows.push({ id: 'cat_all', title: '📋 View All Items', description: 'See the entire menu' });
@@ -1119,7 +1123,7 @@ app.post('/webhook', async (req, res) => {
     // SELECT ITEM
     if (listId && listId.startsWith('item_')) {
       const itemId = listId.replace('item_', '');
-      const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, vendor_id').eq('id', itemId).maybeSingle();
+      const { data: item } = await supabase.from('menu_items').select('id, name, price, in_stock, stock_pause_until, vendor_id').eq('id', itemId).maybeSingle();
       if (!item) { await sendText(from, 'Item not available.'); return; }
       if (!session.vendorId || session.vendorId !== item.vendor_id) {
         if (session.cart.length > 0) { session.cart = []; await sendText(from, '🔄 Previous cart cleared (different restaurant).'); }
@@ -1127,7 +1131,7 @@ app.post('/webhook', async (req, res) => {
         const { data: v } = await supabase.from('vendors').select('store_name').eq('id', item.vendor_id).maybeSingle();
         session.vendorName = v ? v.store_name : 'Restaurant';
       }
-      if (!item.in_stock) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is sold out.`, session.lastCategory); return; }
+      if (!isMenuItemAvailable(item)) { await sendMenu(from, session.vendorId, session.menuPage, `Sorry, ${item.name} is currently unavailable.`, session.lastCategory); return; }
       let entry = session.cart.find(c => c.id === item.id);
       if (entry) entry.qty = Math.min(entry.qty + 1, 20);
       else session.cart.push({ id: item.id, name: item.name, price: Number(item.price), qty: 1 });
