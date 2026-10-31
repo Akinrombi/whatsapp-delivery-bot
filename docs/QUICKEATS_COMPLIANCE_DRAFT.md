@@ -203,3 +203,28 @@ Do not publish this pack as final until these items are verified:
 - NDPC FAQs: https://ndpc.gov.ng/faqs/
 - FCCPC: https://fccpc.gov.ng/
 
+
+
+## 11. Internal technical review — 31 October 2026 (not a legal certification)
+
+This section records a read-only review of the connected production Supabase project and repository. It does not certify the whole platform or replace a penetration test.
+
+### Confirmed controls
+- `password_reset_challenges`, `platform_earnings` and `quickeats_admin_users` have RLS enabled, no policies, and no SELECT/INSERT/UPDATE/DELETE grants to either `anon` or `authenticated`. They remain inaccessible through ordinary client table APIs. Do not add broad policies merely to clear the informational linter finding.
+- The inspected SECURITY DEFINER RPCs are not executable by `anon`. The admin mutation RPCs inspected call `is_admin()` or `quickeats_is_admin()` before changing admin-managed records.
+- `accept_order` checks for an authenticated user, an existing rider profile, approved status, online status, an eligible unassigned order and locks the rider/order rows while accepting.
+- Rider self-service profile changes are guarded by database triggers that prevent a non-admin user from changing profile role, rider identity or approval/review fields.
+- Rider document submission checks required document types, duplicate types, the authenticated user's storage folder and existence in the private `rider-documents` bucket. Admin approval checks required documents have been explicitly approved.
+- Paystack webhook handling verifies the signature against the raw request body and re-verifies transaction status, reference, NGN currency and amount before invoking the idempotent payment RPC.
+
+### Remaining security actions
+- **Meta webhook:** the current bot code validates `X-Hub-Signature-256` only when `META_APP_SECRET` is present. If missing, it logs a warning and continues processing unsigned webhook requests. Change to fail closed only after the correct Meta app secret has been configured and confirmed in Render; otherwise production WhatsApp order updates may stop. This setting was not changed.
+- **Webhook verification token:** `VERIFY_TOKEN` currently has a sample fallback. Replace it with a unique high-entropy Render secret and remove the fallback after confirming the same value is configured in Meta. Not changed to avoid disconnecting the webhook.
+- **Supabase Auth:** leaked-password protection is disabled according to the Auth advisor. The connected tool did not expose the Auth security setting, so it remains a dashboard action.
+- **SECURITY DEFINER advisor:** 21 callable functions are intentionally available to signed-in clients as RPC endpoints. The inspected endpoints include ownership/admin checks; do not blanket-revoke EXECUTE or switch them to INVOKER because Rider, Vendor and Admin workflows call them. Continue reviewing any changed/new RPC before release.
+- **Performance advisor:** three foreign-key indexes are missing and multiple permissive policies are reported. These are performance/maintainability findings, not proof of a data exposure. Review query plans and consolidate duplicate policies in a separate tested migration; do not remove policies without proving equivalent access remains.
+- **Incident response:** define an owner, contact channel, evidence preservation, containment and legal notification decision process. Assess each suspected breach promptly under the Nigeria Data Protection Act and current NDPC guidance; do not promise a fixed notification outcome without a risk assessment.
+
+### Change record
+- No live app code, Render environment variables, Supabase policies, Auth settings or production database schema were changed during this review.
+- The compliance pack remains an internal draft. Legal operator/CAC status, official contact details, processor inventory, retention schedule, real operating terms and professional legal review remain launch blockers.
