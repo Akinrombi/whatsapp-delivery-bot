@@ -441,6 +441,136 @@ app.post('/api/vendor/refund-item', async (req, res) => {
   }
 });
 
+
+/* ---------- VENDOR REPLACEMENT SUGGESTIONS ---------- */
+app.options('/api/vendor/suggest-replacement', (req,res) => {
+  Object.entries(REFUND_CORS_HEADERS).forEach(([k,v])=>res.setHeader(k,v));
+  return res.sendStatus(204);
+});
+
+app.post('/api/vendor/suggest-replacement', async (req,res) => {
+  Object.entries(REFUND_CORS_HEADERS).forEach(([k,v])=>res.setHeader(k,v));
+  try {
+    const authHeader=String(req.headers.authorization||'');
+    const accessToken=authHeader.startsWith('Bearer ')?authHeader.slice(7).trim():'';
+    if(!accessToken)return res.status(401).json({success:false,message:'Please sign in again.'});
+    const {data:authData,error:authError}=await supabase.auth.getUser(accessToken);
+    if(authError||!authData?.user?.id)return res.status(401).json({success:false,message:'Your session expired. Please sign in again.'});
+
+    const orderId=String(req.body?.order_id||'');
+    const itemId=String(req.body?.item_id||'');
+    const replacementId=String(req.body?.replacement_menu_item_id||'');
+    const reason=String(req.body?.reason||'Item unavailable').trim().slice(0,200);
+    const uuidPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if(!uuidPattern.test(orderId)||!itemId||!uuidPattern.test(replacementId)||reason.length<3){
+      return res.status(400).json({success:false,message:'Check the order, unavailable item, replacement and reason.'});
+    }
+
+    const {data:vendor,error:vendorError}=await supabase.from('vendors').select('id,store_name,phone')
+      .eq('owner_id',authData.user.id).maybeSingle();
+    if(vendorError||!vendor)return res.status(403).json({success:false,message:'Vendor account not found.'});
+
+    const {data:order,error:orderError}=await supabase.from('orders')
+      .select('id,order_number,vendor_id,status,payment_status,customer_phone,items')
+      .eq('id',orderId).eq('vendor_id',vendor.id).maybeSingle();
+    if(orderError||!order)return res.status(404).json({success:false,message:'Order not found for this vendor.'});
+    if(['delivered','cancelled'].includes(String(order.status||'').toLowerCase())){
+      return res.status(409).json({success:false,message:'This order can no longer be changed.'});
+    }
+    if(order.payment_status!=='paid')return res.status(409).json({success:false,message:'The customer payment is not confirmed yet.'});
+    const items=Array.isArray(order.items)?order.items:[];
+    const original=items.find(i=>String(i.id||'')===itemId);
+    if(!original)return res.status(404).json({success:false,message:'The selected item is not in this order.'});
+    const quantity=Math.max(1,Number(original.qty||original.quantity||1));
+    const originalPrice=Number(original.unit_price??original.price??0);
+    if(!Number.isFinite(originalPrice)||originalPrice<=0)return res.status(409).json({success:false,message:'The original item price is missing.'});
+
+    const {data:replacement,error:replacementError}=await supabase.from('menu_items')
+      .select('id,vendor_id,name,category,price,in_stock,stock_pause_until')
+      .eq('id',replacementId).eq('vendor_id',vendor.id).eq('in_stock',true)
+      .or('stock_pause_until.is.null,stock_pause_until.lte.'+new Date().toISOString()).maybeSingle();
+    if(replacementError||!replacement)return res.status(409).json({success:false,message:'That replacement is unavailable. Refresh your menu and choose another item.'});
+    if(Number(replacement.price)!==originalPrice){
+      return res.status(409).json({success:false,message:'For this first release, choose a replacement with the same unit price. Price-difference payments and refunds are not enabled for substitutions yet.'});
+    }
+    const {data:pending,error:pendingError}=await supabase.from('order_adjustments').select('id')
+      .eq('order_id',orderId).eq('item_id',itemId).eq('status','pending_customer').maybeSingle();
+    if(pendingError)return res.status(500).json({success:false,message:'Could not check existing replacement requests.'});
+    if(pending)return res.status(409).json({success:false,message:'A replacement suggestion is already waiting for this customer.'});
+
+    const customerPhone=normalizeWhatsAppPhone(order.customer_phone);
+    if(!customerPhone)return res.status(409).json({success:false,message:'The customer WhatsApp number is missing or invalid.'});
+    const token=crypto.randomBytes(4).toString('hex').toUpperCase();
+    const {data:adjustment,error:insertError}=await supabase.from('order_adjustments').insert({
+      order_id:orderId,vendor_id:vendor.id,token,item_id:itemId,
+      original_item:original,
+      replacement_item:replacement,
+      quantity,
+      price_difference:0,
+      reason,
+      status:'pending_customer',
+      customer_phone:customerPhone,
+      created_by:authData.user.id,
+      expires_at:new Date(Date.now()+30*60*1000).toISOString()
+    }).select('id,token,expires_at').single();
+    if(insertError||!adjustment)return res.status(500).json({success:false,message:'Could not create the customer approval request.'});
+
+    const message='🍽️ *QuickEats order update*\\n\\nOrder '+(order.order_number||'')+
+      '\\nSorry, '+String(original.name||'your selected item')+' is unavailable. '+
+      vendor.store_name+' suggests '+replacement.name+' instead.\\n\\nReplacement price: '+naira(replacement.price)+' each (same price as your original item).\\nQuantity: '+quantity+
+      '\\n\\nReply *APPROVE '+token+'* to accept, or *REJECT '+token+'* to decline. Nothing will change until you approve. This request expires in 30 minutes.';
+    const sent=await sendText(customerPhone,message);
+    if(!sent){
+      await supabase.from('order_adjustments').update({status:'failed',updated_at:new Date().toISOString()}).eq('id',adjustment.id);
+      return res.status(502).json({success:false,message:'WhatsApp could not send the approval request. Please try again.'});
+    }
+    return res.status(200).json({success:true,token:adjustment.token,expires_at:adjustment.expires_at,message:'Replacement suggestion sent to the customer for approval.'});
+  }catch(error){
+    console.error('Vendor replacement suggestion failed:',error.message);
+    return res.status(500).json({success:false,message:'Could not send the replacement suggestion.'});
+  }
+});
+
+async function handleCustomerReplacementReply(from,text) {
+  const match=String(text||'').trim().match(/^(APPROVE|REJECT)\s+([A-Z0-9]{6,12})$/i);
+  if(!match)return false;
+  const token=match[2].toUpperCase();
+  const {data:adjustment,error}=await supabase.from('order_adjustments')
+    .select('id,token,order_id,vendor_id,customer_phone,status')
+    .eq('token',token).maybeSingle();
+  if(error||!adjustment)return false;
+  const customerPhone=normalizeWhatsAppPhone(from);
+  if(!customerPhone||customerPhone!==normalizeWhatsAppPhone(adjustment.customer_phone)){
+    await sendText(from,'This replacement approval code is not linked to this WhatsApp number.');
+    return true;
+  }
+  const action=match[1].toUpperCase();
+  const {data:updated,error:respondError}=await supabase.rpc('respond_quickeats_order_adjustment',{
+    p_token:token,p_customer_phone:customerPhone,p_action:action
+  });
+  if(respondError){
+    await sendText(from,'Sorry, we could not apply this replacement. The vendor will need to send a new suggestion. '+String(respondError.message||'').slice(0,180));
+    return true;
+  }
+  const row=Array.isArray(updated)?updated[0]:updated;
+  const {data:order}=await supabase.from('orders').select('order_number').eq('id',adjustment.order_id).maybeSingle();
+  const {data:vendor}=await supabase.from('vendors').select('store_name,phone').eq('id',adjustment.vendor_id).maybeSingle();
+  if(row?.status==='applied'){
+    await sendText(from,'✅ Thank you. Your replacement has been approved and updated on order '+(order?.order_number||'')+'.');
+    const vendorPhone=normalizeWhatsAppPhone(vendor?.phone);
+    if(vendorPhone)await sendText(vendorPhone,'✅ Customer approved replacement '+token+' for order '+(order?.order_number||'')+'. The order item has been updated.');
+  }else if(row?.status==='rejected'){
+    await sendText(from,'No problem. The replacement was declined. The vendor has been notified and can arrange another option or a refund.');
+    const vendorPhone=normalizeWhatsAppPhone(vendor?.phone);
+    if(vendorPhone)await sendText(vendorPhone,'Customer declined replacement '+token+' for order '+(order?.order_number||'')+'. Please contact the customer or issue an item refund.');
+  }else if(row?.status==='expired'){
+    await sendText(from,'This replacement request has expired. Please ask the vendor to send a new suggestion.');
+  }else{
+    await sendText(from,'This replacement request has already been answered.');
+  }
+  return true;
+}
+
 /* ---------- AUTHENTICATED RIDER DELIVERY-CODE RESEND ---------- */
 const RIDER_APP_ORIGIN = (process.env.RIDER_APP_ORIGIN || 'https://partner-app-5l9f.onrender.com').replace(/\/$/, '');
 
@@ -999,6 +1129,8 @@ app.post('/webhook', async (req, res) => {
     const listId = message.interactive?.list_reply?.id;
     const btnId = message.interactive?.button_reply?.id;
     const location = message.location;
+
+    if (text && await handleCustomerReplacementReply(from, text)) return;
 
     const session = getSession(from);
 
