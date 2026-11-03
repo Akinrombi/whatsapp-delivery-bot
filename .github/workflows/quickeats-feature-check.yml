@@ -16,5 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Show checked revision
+        run: git rev-parse HEAD
       - name: Check WhatsApp bot JavaScript syntax
         run: node --check whatsapp-bot-server.js
