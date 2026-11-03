@@ -380,6 +380,14 @@ app.post('/api/vendor/refund-item', async (req, res) => {
       await supabase.rpc('complete_quickeats_vendor_refund',{p_refund_id:refund.id,p_provider_status:'failed',p_provider_response:{message:'Order could not be reloaded.'}});
       return res.status(404).json({ success:false, message:'Order could not be reloaded.' });
     }
+    const customerPhone = normalizeWhatsAppPhone(order.customer_phone);
+    if (!customerPhone) {
+      await supabase.rpc('complete_quickeats_vendor_refund',{
+        p_refund_id:refund.id,p_provider_status:'failed',
+        p_provider_response:{message:'Customer WhatsApp number is missing or invalid.'}
+      });
+      return res.status(409).json({success:false,message:'The customer WhatsApp number is missing or invalid. Update the order contact before refunding.'});
+    }
 
     try {
       const response = await axios.post('https://api.paystack.co/refund', {
@@ -415,16 +423,14 @@ app.post('/api/vendor/refund-item', async (req, res) => {
         return res.status(202).json({success:true,refund_id:refund.id,amount:Number(refund.amount),status:providerStatus,message:'Paystack accepted the refund. The ledger update needs reconciliation; do not submit another refund.'});
       }
 
-      const customerPhone = normalizeWhatsAppPhone(order.customer_phone);
-      if (customerPhone) {
-        await sendText(customerPhone,
+      const notificationSent = await sendText(customerPhone,
           '💸 QuickEats refund update for order ' + (order.order_number || '') +
           '\\nItem: ' + refund.item_name + ' (' + refund.quantity + ')' +
           '\\nAmount: ' + naira(refund.amount) +
           '\\nStatus: ' + providerStatus +
           '\\nPaystack will notify us when the refund is completed. Please allow the bank processing time.'
         );
-      }
+      if (!notificationSent) console.warn('Refund submitted but WhatsApp customer notification could not be sent:',order.id);
       return res.status(200).json({
         success:true,refund_id:refund.id,amount:Number(refund.amount),status:finalRefund?.status || providerStatus,
         message:'Refund submitted to Paystack. The customer has been notified.'
@@ -481,8 +487,8 @@ app.post('/api/vendor/suggest-replacement', async (req,res) => {
       .select('id,order_number,vendor_id,status,payment_status,customer_phone,items')
       .eq('id',orderId).eq('vendor_id',vendor.id).maybeSingle();
     if(orderError||!order)return res.status(404).json({success:false,message:'Order not found for this vendor.'});
-    if(['delivered','cancelled'].includes(String(order.status||'').toLowerCase())){
-      return res.status(409).json({success:false,message:'This order can no longer be changed.'});
+    if(!['new','vendor_accepted','ready_for_pickup'].includes(String(order.status||'').toLowerCase())){
+      return res.status(409).json({success:false,message:'This order has progressed too far to replace an item.'});
     }
     if(order.payment_status!=='paid')return res.status(409).json({success:false,message:'The customer payment is not confirmed yet.'});
     const items=Array.isArray(order.items)?order.items:[];
