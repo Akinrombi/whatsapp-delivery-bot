@@ -539,7 +539,15 @@ async function handleCustomerReplacementReply(from,text) {
   const {data:adjustment,error}=await supabase.from('order_adjustments')
     .select('id,token,order_id,vendor_id,customer_phone,status')
     .eq('token',token).maybeSingle();
-  if(error||!adjustment)return false;
+  if(error){
+    console.error('Customer replacement lookup failed:',error.message);
+    await sendText(from,'We could not check that replacement code right now. Please try again shortly.');
+    return true;
+  }
+  if(!adjustment){
+    await sendText(from,'We could not find that QuickEats replacement code. Please check the code and try again.');
+    return true;
+  }
   const customerPhone=normalizeWhatsAppPhone(from);
   if(!customerPhone||customerPhone!==normalizeWhatsAppPhone(adjustment.customer_phone)){
     await sendText(from,'This replacement approval code is not linked to this WhatsApp number.');
@@ -550,7 +558,11 @@ async function handleCustomerReplacementReply(from,text) {
     p_token:token,p_customer_phone:customerPhone,p_action:action
   });
   if(respondError){
-    await sendText(from,'Sorry, we could not apply this replacement. The vendor will need to send a new suggestion. '+String(respondError.message||'').slice(0,180));
+    await supabase.from('order_adjustments').update({status:'failed',updated_at:new Date().toISOString()}).eq('id',adjustment.id).eq('status','pending_customer');
+    const {data:vendorInfo}=await supabase.from('vendors').select('phone').eq('id',adjustment.vendor_id).maybeSingle();
+    const vendorPhone=normalizeWhatsAppPhone(vendorInfo?.phone);
+    if(vendorPhone)await sendText(vendorPhone,'Replacement request '+token+' could not be applied. Please choose another available item and send a fresh suggestion.');
+    await sendText(from,'Sorry, we could not apply this replacement. The vendor has been notified and will send a new suggestion. '+String(respondError.message||'').slice(0,120));
     return true;
   }
   const row=Array.isArray(updated)?updated[0]:updated;
