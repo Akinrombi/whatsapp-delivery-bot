@@ -487,9 +487,10 @@ app.post('/api/vendor/suggest-replacement', async (req,res) => {
 
     const {data:replacement,error:replacementError}=await supabase.from('menu_items')
       .select('id,vendor_id,name,category,price,in_stock,stock_pause_until')
-      .eq('id',replacementId).eq('vendor_id',vendor.id).eq('in_stock',true)
-      .or('stock_pause_until.is.null,stock_pause_until.lte.'+new Date().toISOString()).maybeSingle();
-    if(replacementError||!replacement)return res.status(409).json({success:false,message:'That replacement is unavailable. Refresh your menu and choose another item.'});
+      .eq('id',replacementId).eq('vendor_id',vendor.id).eq('in_stock',true).maybeSingle();
+    if(replacementError||!replacement||(replacement.stock_pause_until&&new Date(replacement.stock_pause_until).getTime()>Date.now())){
+      return res.status(409).json({success:false,message:'That replacement is unavailable. Refresh your menu and choose another item.'});
+    }
     if(Number(replacement.price)!==originalPrice){
       return res.status(409).json({success:false,message:'For this first release, choose a replacement with the same unit price. Price-difference payments and refunds are not enabled for substitutions yet.'});
     }
