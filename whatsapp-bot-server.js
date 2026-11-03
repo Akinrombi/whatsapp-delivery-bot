@@ -189,6 +189,60 @@ app.post('/paystack/webhook', async (req, res) => {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
 
   try {
+    const eventName = String(req.body?.event || '');
+    if (eventName.startsWith('refund.')) {
+      const data = req.body?.data || {};
+      const providerStatus = eventName.slice('refund.'.length).toLowerCase();
+      const allowed = ['pending','processing','needs-attention','processed','failed'];
+      if (!allowed.includes(providerStatus)) return res.sendStatus(200);
+
+      let matches = [];
+      let lookup = supabase.from('order_refunds')
+        .select('id,order_id,amount_kobo,payment_reference,paystack_refund_id')
+        .eq('payment_reference',String(data.transaction_reference || ''))
+        .eq('amount_kobo',Number(data.amount || 0))
+        .in('status',['pending','processing','needs-attention'])
+        .order('created_at',{ascending:false})
+        .limit(2);
+      if (data.id) {
+        lookup = supabase.from('order_refunds').select('id,order_id,amount_kobo,payment_reference,paystack_refund_id')
+          .eq('paystack_refund_id',String(data.id)).limit(2);
+      }
+      const {data: found,error: lookupError}=await lookup;
+      if (lookupError) {
+        console.error('Refund webhook lookup failed:',lookupError.message);
+        return res.sendStatus(500);
+      }
+      matches=found||[];
+      // If Paystack does not include a refund ID and multiple identical refunds match,
+      // do not guess which ledger row to change. Leave it for admin reconciliation.
+      if (matches.length !== 1) {
+        console.warn('Refund webhook could not uniquely identify a ledger row:',eventName,matches.length);
+        return res.sendStatus(200);
+      }
+      const match=matches[0];
+      const {error: finalizeError}=await supabase.rpc('complete_quickeats_vendor_refund',{
+        p_refund_id:match.id,
+        p_provider_status:providerStatus,
+        p_provider_refund_id:data.id?String(data.id):null,
+        p_provider_response:{event:eventName,status:providerStatus,refund_reference:data.refund_reference||null}
+      });
+      if (finalizeError) {
+        console.error('Refund webhook ledger update failed:',finalizeError.message);
+        return res.sendStatus(500);
+      }
+      if (providerStatus==='processed'||providerStatus==='failed') {
+        const {data: order}=await supabase.from('orders').select('order_number,customer_phone').eq('id',match.order_id).maybeSingle();
+        const customerPhone=normalizeWhatsAppPhone(order?.customer_phone);
+        if (customerPhone) await sendText(customerPhone,
+          providerStatus==='processed'
+            ? '✅ Your QuickEats refund for order '+(order?.order_number||'')+' has been processed by Paystack. Your bank may take additional time to reflect it.'
+            : '⚠️ Your QuickEats refund for order '+(order?.order_number||'')+' could not be completed by Paystack. QuickEats support will follow up.'
+        );
+      }
+      return res.sendStatus(200);
+    }
+
     // Ignore unrelated, validly signed Paystack events.
     if (req.body?.event !== 'charge.success' || !req.body.data?.reference) {
       return res.sendStatus(200);
@@ -237,6 +291,155 @@ function sendList(to, header, body, button, sectionTitle, rows) {
   return sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'interactive', interactive: { type: 'list', header: { type: 'text', text: header }, body: { text: body }, action: { button, sections: [{ title: sectionTitle, rows }] } } });
 }
 
+
+
+/* ---------- VENDOR ITEM REFUNDS (TEST MODE ONLY UNTIL LIVE REFUNDS ARE APPROVED) ---------- */
+const REFUND_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS'
+};
+
+app.options('/api/vendor/refund-item', (req, res) => {
+  Object.entries(REFUND_CORS_HEADERS).forEach(([k,v]) => res.setHeader(k,v));
+  return res.sendStatus(204);
+});
+
+app.post('/api/vendor/refund-item', async (req, res) => {
+  Object.entries(REFUND_CORS_HEADERS).forEach(([k,v]) => res.setHeader(k,v));
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!accessToken) return res.status(401).json({ success:false, message:'Please sign in again.' });
+    if (!SUPABASE_SERVICE_KEY) return res.status(503).json({ success:false, message:'Refund service is not configured.' });
+
+    // Development safety: this endpoint refuses live Paystack keys. No live customer money can be refunded.
+    if (!PAYSTACK_SECRET_KEY || !PAYSTACK_SECRET_KEY.startsWith('sk_test_')) {
+      return res.status(503).json({ success:false, message:'Refund testing is locked to a Paystack test key. Live refunds have not been enabled.' });
+    }
+
+    const { data: authData, error: authError } = await supabase.auth.getUser(accessToken);
+    if (authError || !authData?.user?.id) {
+      return res.status(401).json({ success:false, message:'Your session expired. Please sign in again.' });
+    }
+
+    const orderId = String(req.body?.order_id || '');
+    const itemId = String(req.body?.item_id || '');
+    const quantity = Number(req.body?.quantity);
+    const reason = String(req.body?.reason || '').trim().slice(0,240);
+    const idempotencyKey = String(req.body?.idempotency_key || '').trim();
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuidPattern.test(orderId) || !itemId || itemId.length > 100 ||
+        !Number.isInteger(quantity) || quantity < 1 || quantity > 20 ||
+        reason.length < 3 || idempotencyKey.length < 12 || idempotencyKey.length > 120) {
+      return res.status(400).json({ success:false, message:'Check the order, item, quantity, reason and request key.' });
+    }
+
+    const { data: vendor, error: vendorError } = await supabase
+      .from('vendors').select('id,store_name').eq('owner_id',authData.user.id).maybeSingle();
+    if (vendorError || !vendor) return res.status(403).json({ success:false, message:'Vendor account not found.' });
+
+    const { data: refund, error: prepareError } = await supabase.rpc('prepare_quickeats_vendor_refund', {
+      p_order_id: orderId,
+      p_vendor_id: vendor.id,
+      p_item_id: itemId,
+      p_quantity: quantity,
+      p_reason: reason,
+      p_created_by: authData.user.id,
+      p_idempotency_key: idempotencyKey
+    });
+    if (prepareError || !refund?.id) {
+      return res.status(409).json({ success:false, message:prepareError?.message || 'Could not prepare the refund.' });
+    }
+
+    // Atomically claim the refund so duplicate taps/retries cannot submit twice to Paystack.
+    const { data: claim, error: claimError } = await supabase
+      .from('order_refunds')
+      .update({ status:'pending', provider_status:'submitting', updated_at:new Date().toISOString() })
+      .eq('id',refund.id).eq('status','initiated').is('provider_status',null)
+      .select('id').maybeSingle();
+    if (claimError) return res.status(500).json({ success:false, message:'Could not reserve the refund request. Contact support before retrying.' });
+    if (!claim?.id) {
+      return res.status(202).json({
+        success:true, duplicate:true, refund_id:refund.id, amount:Number(refund.amount),
+        status:refund.status, message:'This refund request already exists. No second Paystack refund was submitted.'
+      });
+    }
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders').select('id,order_number,customer_phone,payment_reference')
+      .eq('id',orderId).eq('vendor_id',vendor.id).maybeSingle();
+    if (orderError || !order) {
+      await supabase.rpc('complete_quickeats_vendor_refund',{p_refund_id:refund.id,p_provider_status:'failed',p_provider_response:{message:'Order could not be reloaded.'}});
+      return res.status(404).json({ success:false, message:'Order could not be reloaded.' });
+    }
+
+    try {
+      const response = await axios.post('https://api.paystack.co/refund', {
+        transaction: refund.payment_reference,
+        amount: Number(refund.amount_kobo),
+        currency: 'NGN',
+        customer_note: reason,
+        merchant_note: 'QuickEats partial item refund for order ' + (order.order_number || order.id)
+      }, {
+        headers:{ Authorization:'Bearer '+PAYSTACK_SECRET_KEY, 'Content-Type':'application/json' },
+        timeout:20000
+      });
+
+      if (!response.data?.status) {
+        await supabase.rpc('complete_quickeats_vendor_refund',{
+          p_refund_id:refund.id,p_provider_status:'failed',
+          p_provider_response:{message:String(response.data?.message || 'Paystack rejected the refund.').slice(0,500)}
+        });
+        return res.status(502).json({ success:false, message:response.data?.message || 'Paystack could not initiate the refund.' });
+      }
+
+      const provider = response.data.data || {};
+      const providerStatus = ['pending','processing','needs-attention','processed','failed'].includes(String(provider.status || '').toLowerCase())
+        ? String(provider.status).toLowerCase() : 'pending';
+      const { data: finalRefund, error: finalizeError } = await supabase.rpc('complete_quickeats_vendor_refund',{
+        p_refund_id:refund.id,
+        p_provider_status:providerStatus,
+        p_provider_refund_id:provider.id ? String(provider.id) : null,
+        p_provider_response:{message:String(response.data.message || '').slice(0,300),status:providerStatus,id:provider.id || null}
+      });
+      if (finalizeError) {
+        console.error('Paystack refund started but ledger finalization failed:',finalizeError.message);
+        return res.status(202).json({success:true,refund_id:refund.id,amount:Number(refund.amount),status:providerStatus,message:'Paystack accepted the refund. The ledger update needs reconciliation; do not submit another refund.'});
+      }
+
+      const customerPhone = normalizeWhatsAppPhone(order.customer_phone);
+      if (customerPhone) {
+        await sendText(customerPhone,
+          '💸 QuickEats refund update for order ' + (order.order_number || '') +
+          '\\nItem: ' + refund.item_name + ' (' + refund.quantity + ')' +
+          '\\nAmount: ' + naira(refund.amount) +
+          '\\nStatus: ' + providerStatus +
+          '\\nPaystack will notify us when the refund is completed. Please allow the bank processing time.'
+        );
+      }
+      return res.status(200).json({
+        success:true,refund_id:refund.id,amount:Number(refund.amount),status:finalRefund?.status || providerStatus,
+        message:'Refund submitted to Paystack. The customer has been notified.'
+      });
+    } catch (providerError) {
+      // A timeout may happen after Paystack accepted the request. Keep the reservation pending
+      // and never automatically retry the external refund, which could refund twice.
+      if (providerError.response) {
+        await supabase.rpc('complete_quickeats_vendor_refund',{
+          p_refund_id:refund.id,p_provider_status:'failed',
+          p_provider_response:{message:String(providerError.response.data?.message || providerError.message || 'Paystack request failed').slice(0,500)}
+        });
+        return res.status(502).json({success:false,message:providerError.response.data?.message || 'Paystack rejected the refund.'});
+      }
+      console.error('Paystack refund outcome is uncertain; reconciliation required:',providerError.message);
+      return res.status(202).json({success:true,refund_id:refund.id,amount:Number(refund.amount),status:'pending',message:'The refund request is awaiting confirmation from Paystack. Do not submit it again.'});
+    }
+  } catch (error) {
+    console.error('Vendor refund endpoint failed:',error.message);
+    return res.status(500).json({success:false,message:'Refund could not be completed. Please contact QuickEats support.'});
+  }
+});
 
 /* ---------- AUTHENTICATED RIDER DELIVERY-CODE RESEND ---------- */
 const RIDER_APP_ORIGIN = (process.env.RIDER_APP_ORIGIN || 'https://partner-app-5l9f.onrender.com').replace(/\/$/, '');
