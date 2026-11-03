@@ -358,7 +358,14 @@ app.post('/api/vendor/refund-item', async (req, res) => {
       .update({ status:'pending', provider_status:'submitting', updated_at:new Date().toISOString() })
       .eq('id',refund.id).eq('status','initiated').is('provider_status',null)
       .select('id').maybeSingle();
-    if (claimError) return res.status(500).json({ success:false, message:'Could not reserve the refund request. Contact support before retrying.' });
+    if (claimError) {
+      await supabase.rpc('complete_quickeats_vendor_refund',{
+        p_refund_id:refund.id,
+        p_provider_status:'failed',
+        p_provider_response:{message:'Refund could not be reserved safely. '+String(claimError.message||'').slice(0,240)}
+      });
+      return res.status(409).json({ success:false, message:'A similar refund is already pending or the refund could not be reserved safely. Check refund history before trying again.' });
+    }
     if (!claim?.id) {
       return res.status(202).json({
         success:true, duplicate:true, refund_id:refund.id, amount:Number(refund.amount),
