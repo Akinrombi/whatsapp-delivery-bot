@@ -425,10 +425,10 @@ app.post('/api/vendor/refund-item', async (req, res) => {
 
       const notificationSent = await sendText(customerPhone,
           '💸 QuickEats refund update for order ' + (order.order_number || '') +
-          '\\nItem: ' + refund.item_name + ' (' + refund.quantity + ')' +
-          '\\nAmount: ' + naira(refund.amount) +
-          '\\nStatus: ' + providerStatus +
-          '\\nPaystack will notify us when the refund is completed. Please allow the bank processing time.'
+          '\nItem: ' + refund.item_name + ' (' + refund.quantity + ')' +
+          '\nAmount: ' + naira(refund.amount) +
+          '\nStatus: ' + providerStatus +
+          '\nPaystack will notify us when the refund is completed. Please allow the bank processing time.'
         );
       if (!notificationSent) console.warn('Refund submitted but WhatsApp customer notification could not be sent:',order.id);
       return res.status(200).json({
@@ -529,10 +529,10 @@ app.post('/api/vendor/suggest-replacement', async (req,res) => {
     }).select('id,token,expires_at').single();
     if(insertError||!adjustment)return res.status(500).json({success:false,message:'Could not create the customer approval request.'});
 
-    const message='🍽️ *QuickEats order update*\\n\\nOrder '+(order.order_number||'')+
-      '\\nSorry, '+String(original.name||'your selected item')+' is unavailable. '+
-      vendor.store_name+' suggests '+replacement.name+' instead.\\n\\nReplacement price: '+naira(replacement.price)+' each (same price as your original item).\\nQuantity: '+quantity+
-      '\\n\\nReply *APPROVE '+token+'* to accept, or *REJECT '+token+'* to decline. Nothing will change until you approve. This request expires in 30 minutes.';
+    const message='🍽️ *QuickEats order update*\n\nOrder '+(order.order_number||'')+
+      '\nSorry, '+String(original.name||'your selected item')+' is unavailable. '+
+      vendor.store_name+' suggests '+replacement.name+' instead.\n\nReplacement price: '+naira(replacement.price)+' each (same price as your original item).\nQuantity: '+quantity+
+      '\n\nReply *APPROVE '+token+'* to accept, or *REJECT '+token+'* to decline. Nothing will change until you approve. This request expires in 30 minutes.';
     const sent=await sendText(customerPhone,message);
     if(!sent){
       await supabase.from('order_adjustments').update({status:'failed',updated_at:new Date().toISOString()}).eq('id',adjustment.id);
