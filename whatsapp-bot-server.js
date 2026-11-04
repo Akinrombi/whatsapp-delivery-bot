@@ -10,6 +10,7 @@ app.use(express.json({ verify: (req, res, buf) => { req.rawBody = Buffer.from(bu
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://glkutdkwbrjpiuqcmgwe.supabase.co';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_ID || '';
 const WHATSAPP_GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION || 'v26.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
@@ -289,6 +290,57 @@ function sendButtonMessage(to, bodyText, buttons) {
 }
 function sendList(to, header, body, button, sectionTitle, rows) {
   return sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'interactive', interactive: { type: 'list', header: { type: 'text', text: header }, body: { text: body }, action: { button, sections: [{ title: sectionTitle, rows }] } } });
+}
+
+async function transcribeWhatsAppAudio(audioMessage) {
+  if (!OPENAI_API_KEY) throw new Error('VOICE_TRANSCRIPTION_NOT_CONFIGURED');
+  const mediaId = String(audioMessage?.id || '');
+  if (!/^\\d+$/.test(mediaId)) throw new Error('WhatsApp voice note is missing its media ID.');
+
+  const mediaMeta = await axios.get(
+    `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, timeout: 20000 }
+  );
+  const mediaUrl = String(mediaMeta.data?.url || '');
+  const mimeType = String(mediaMeta.data?.mime_type || 'audio/ogg').split(';')[0].trim().toLowerCase();
+  const extensions = {
+    'audio/ogg': 'ogg', 'application/ogg': 'ogg', 'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a',
+    'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/webm': 'webm'
+  };
+  const extension = extensions[mimeType];
+  if (!mediaUrl || !extension) throw new Error('Unsupported WhatsApp audio format: ' + mimeType);
+
+  const download = await axios.get(mediaUrl, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    responseType: 'arraybuffer', timeout: 30000, maxContentLength: 25 * 1024 * 1024
+  });
+  const audio = Buffer.from(download.data);
+  if (!audio.length || audio.length > 25 * 1024 * 1024) throw new Error('Voice note is empty or exceeds the 25 MB limit.');
+
+  const boundary = '----ZenzoraVoice' + crypto.randomBytes(16).toString('hex');
+  const fields = {
+    model: 'gpt-transcribe',
+    response_format: 'json',
+    prompt: 'Transcribe a Nigerian food delivery order. The speaker may use Nigerian English or Nigerian Pidgin. Food names may include jollof rice, fried rice, chicken, turkey, beef, moi moi, amala, eba, fufu, pounded yam, egusi, efo riro, suya, shawarma, plantain and beans. Preserve all quantities, pack sizes and instructions exactly. Do not invent or correct an order.'
+  };
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+  }
+  chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="customer-voice.${extension}"\r\nContent-Type: ${mimeType}\r\n\r\n`));
+  chunks.push(audio);
+  chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+  const body = Buffer.concat(chunks);
+
+  const transcription = await axios.post('https://api.openai.com/v1/audio/transcriptions', body, {
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`
+    },
+    timeout: 60000, maxBodyLength: 26 * 1024 * 1024, maxContentLength: 1024 * 1024
+  });
+  return String(transcription.data?.text || '').trim().slice(0, 1500);
 }
 
 
@@ -847,7 +899,7 @@ function parseNaturalOrderText(rawText) {
   text = text.replace(/^(?:hi|hello|please)\s*[,!:\-]?\s*/i, '');
   text = text.replace(/^(?:i would like|i'd like|i want|can i get|could i get|please get me|get me|i need|order|i'll have)\s+/i, '');
   const separators = /[,;]+|\s+\+\s+|\s+and\s+(?=(?:\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b)/i;
-  const segments = text.split(separators).map(s => s.trim()).filter(Boolean);
+
   const items = [];
   const addItem = (name, qty, unit) => {
     name = String(name || '').replace(/^(?:of|some)\s+/i, '').replace(/\b(?:please|thanks|thank you)\b/gi, '').trim();
@@ -859,6 +911,16 @@ function parseNaturalOrderText(rawText) {
     else items.push({ name, normalized, qty, unit: unit || null });
   };
   const quantityPattern = '(\\d+|one|a|an|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
+  // Interpret "five packs of jollof rice, two chicken in each" as five rice packs and ten chicken.
+  const packMatch = new RegExp('^' + quantityPattern + '\\s+(?:packs?|boxes?|sets?)\\s+of\\s+([^,;]+)', 'i').exec(text);
+  const eachMatch = new RegExp('(?:,|\\band\\b)\\s*' + quantityPattern + '\\s+(.+?)\\s+in each\\b', 'i').exec(text);
+  if (packMatch && eachMatch) {
+    const packCount = Number(packMatch[1]) || NUMBER_WORDS[packMatch[1]] || 1;
+    const perPackCount = Number(eachMatch[1]) || NUMBER_WORDS[eachMatch[1]] || 1;
+    text = text.replace(packMatch[0], String(packCount) + ' ' + packMatch[2].trim())
+      .replace(eachMatch[0], String(Math.min(50, packCount * perPackCount)) + ' ' + eachMatch[2].trim());
+  }
+  const segments = text.split(separators).map(s => s.trim()).filter(Boolean);
   for (const segment of segments) {
     let part = segment.replace(/^(?:please|also|and)\s+/i, '').trim();
     // Support both "5 meat" and "meat 5 rice" (five meat plus one rice).
@@ -1150,7 +1212,23 @@ app.post('/webhook', async (req, res) => {
       delete sessions[from];
     }
     const profileName = value?.contacts?.[0]?.profile?.name || 'Customer';
-    const text = message.text?.body ? message.text.body.trim() : '';
+    let text = message.text?.body ? message.text.body.trim() : '';
+    if (message.type === 'audio') {
+      try {
+        text = await transcribeWhatsAppAudio(message.audio);
+        if (!text) {
+          await sendText(from, 'I could not hear any clear words in that voice note. Please send it again, a little more clearly.');
+          return;
+        }
+        await sendText(from, '🎙️ *I heard your order as:*\n' + text + '\n\nI am checking restaurant menus now. Please review the order details before confirming payment.');
+      } catch (audioError) {
+        console.error('WhatsApp voice transcription failed:', audioError.response?.data || audioError.message);
+        await sendText(from, audioError.message === 'VOICE_TRANSCRIPTION_NOT_CONFIGURED'
+          ? '🎙️ Voice-note ordering is being connected. For now, please type your food order. We will let you know when voice ordering is ready.'
+          : 'Sorry, I could not process that voice note. Please try again or type your food order.');
+        return;
+      }
+    }
     const textLower = text.toLowerCase();
     const listId = message.interactive?.list_reply?.id;
     const btnId = message.interactive?.button_reply?.id;
