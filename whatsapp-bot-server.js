@@ -295,7 +295,8 @@ function sendList(to, header, body, button, sectionTitle, rows) {
 async function transcribeWhatsAppAudio(audioMessage) {
   if (!OPENAI_API_KEY) throw new Error('VOICE_TRANSCRIPTION_NOT_CONFIGURED');
   const mediaId = String(audioMessage?.id || '');
-  if (!/^\\d+$/.test(mediaId)) throw new Error('WhatsApp voice note is missing its media ID.');
+  if (!mediaId) throw new Error('WhatsApp voice note is missing its media ID.');
+  if (!/^\d+$/.test(mediaId)) throw new Error('WhatsApp returned an invalid audio media ID.');
 
   const mediaMeta = await axios.get(
     `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
