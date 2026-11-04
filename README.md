@@ -7,6 +7,7 @@ Customer ordering runs through WhatsApp. The bot connects to the shared Supabase
 - `SUPABASE_URL` — QuickEats Supabase project URL.
 - `SUPABASE_SERVICE_KEY` — Supabase service-role key. Keep this only in Render secrets; never put it in browser code or commit it.
 - `WHATSAPP_TOKEN` — WhatsApp Cloud API access token.
+- `OPENAI_API_KEY` — OpenAI API key used server-side to transcribe customer WhatsApp voice notes. Keep it only in Render secrets; API usage is billed separately from ChatGPT.
 - `PHONE_NUMBER_ID` — WhatsApp sender phone-number ID. The server also accepts the legacy `WHATSAPP_PHONE_ID` name.
 - `WHATSAPP_GRAPH_API_VERSION` — Graph API version; default is `v26.0`.
 - `META_APP_SECRET` — Meta app secret used to verify `X-Hub-Signature-256` on incoming WhatsApp webhooks. Set this before production. The server logs a warning and accepts unsigned webhooks if it is missing.
@@ -50,5 +51,6 @@ Use the same `VERIFY_TOKEN` value in Meta and Render, and subscribe to the `mess
 - Test a complete WhatsApp order, Paystack verification, vendor acceptance, rider assignment, delivery PIN verification, and customer status notifications using controlled test accounts.
 
 ## Current implementation notes
+- Customer voice notes are downloaded from WhatsApp Cloud API, transcribed with OpenAI's `gpt-transcribe` model, and passed into the existing restaurant/menu matching flow. The bot echoes the transcript before searching. Voice ordering requires `OPENAI_API_KEY` in the Render service environment.
 
 The server contains menu matching for saved vendor items, custom-item quote handling, customer checkout breakdowns, Paystack payment verification, rider assignment integration, and customer status notifications. The README should be kept aligned with the deployed code whenever those flows change.
