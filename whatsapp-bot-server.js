@@ -918,7 +918,7 @@ function parseNaturalOrderText(rawText) {
     const packCount = Number(packMatch[1]) || NUMBER_WORDS[packMatch[1]] || 1;
     const perPackCount = Number(eachMatch[1]) || NUMBER_WORDS[eachMatch[1]] || 1;
     text = text.replace(packMatch[0], String(packCount) + ' ' + packMatch[2].trim())
-      .replace(eachMatch[0], String(Math.min(50, packCount * perPackCount)) + ' ' + eachMatch[2].trim());
+      .replace(eachMatch[0], ', ' + String(Math.min(50, packCount * perPackCount)) + ' ' + eachMatch[2].trim());
   }
   const segments = text.split(separators).map(s => s.trim()).filter(Boolean);
   for (const segment of segments) {
