@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const createRideBookingHandler = require('./ride-booking');
 
 const app = express();
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));
@@ -281,6 +282,9 @@ function sendButtonMessage(to, bodyText, buttons) {
 function sendList(to, header, body, button, sectionTitle, rows) {
   return sendWhatsAppMessage(to, { messaging_product: 'whatsapp', to, type: 'interactive', interactive: { type: 'list', header: { type: 'text', text: header }, body: { text: body }, action: { button, sections: [{ title: sectionTitle, rows }] } } });
 }
+
+const handleRideBookingMessage = createRideBookingHandler({ supabase, sendText });
+setInterval(() => handleRideBookingMessage.notifyCustomers(), 8000);
 
 async function transcribeWhatsAppAudio(audioMessage) {
   if (!OPENAI_API_KEY) throw new Error('VOICE_TRANSCRIPTION_NOT_CONFIGURED');
@@ -1238,6 +1242,8 @@ app.post('/webhook', async (req, res) => {
     if (text && await handleCustomerReplacementReply(from, text)) return;
 
     const session = getSession(from);
+
+    if (await handleRideBookingMessage({ from, text, textLower, listId, btnId, location, session })) return;
 
     // FLOW SUBMISSION
     if (message.interactive?.type === 'nfm_reply') {
