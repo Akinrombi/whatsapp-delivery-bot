@@ -40,6 +40,11 @@ module.exports = function createRideBookingHandler({ supabase, sendText }) {
 
   async function handleRideBookingMessage({ from, text, textLower, listId, btnId, location, session }) {
     const state = session.rideBooking || null;
+    if (state && ['menu', 'start', 'hi', 'hello'].includes(textLower)) {
+      delete session.rideBooking;
+      return false;
+    }
+
     if (state && ['cancel', 'cancel ride'].includes(textLower)) {
       delete session.rideBooking;
       await sendText(from, 'Your ride booking has been cancelled. Send *menu* to return to Zenzora services.');
