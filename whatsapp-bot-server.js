@@ -101,16 +101,6 @@ function formatOrderBreakdown(session) {
   return `Food subtotal: ${naira(b.foodSubtotal)}\nDelivery fee: ${naira(b.deliveryFee)}${feeText}\nService charge: ${naira(b.serviceCharge)}\nDiscount: -${naira(b.discount)}\n*Total to pay: ${naira(b.total)}*`;
 }
 
-const seen = new Set();
-function alreadySeen(id) {
-  if (!id) return false;
-  if (seen.has(id)) return true;
-  seen.add(id);
-  if (seen.size > 2000) seen.delete(seen.values().next().value);
-  return false;
-}
-
-
 // ---------- PAYSTACK CHECKOUT ----------
 async function paystackRequest(path, body) {
   if (!PAYSTACK_SECRET_KEY) throw new Error('PAYSTACK_SECRET_KEY is not configured');
@@ -1182,7 +1172,17 @@ app.post('/webhook', async (req, res) => {
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
-    if (!message || alreadySeen(message.id)) return;
+    if (!message?.id) return;
+
+    // Durable deduplication works across Render instances and process restarts.
+    const { error: dedupeError } = await supabase
+      .from('whatsapp_processed_messages')
+      .insert({ message_id: message.id });
+    if (dedupeError) {
+      if (dedupeError.code === '23505') return; // Meta retried an already-processed message.
+      console.error('WhatsApp message deduplication failed:', dedupeError.message);
+      return; // Fail closed: never risk creating a duplicate order.
+    }
 
     // Global QuickEats shutdown: stop WhatsApp ordering while preserving payment callbacks for orders already created.
     const { data: systemControl, error: systemControlError } = await supabase
