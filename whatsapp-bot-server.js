@@ -767,8 +767,8 @@ async function sendMainMenu(to) {
 async function sendVendorList(to, page = 0, note = '') {
   const PAGE_SIZE = 6; 
   const start = page * PAGE_SIZE;
-  const { count: totalCount } = await supabase.from('vendors').select('*', { count: 'exact', head: true }).eq('is_open', true);
-  const { data: stores, error } = await supabase.from('vendors').select('id, store_name, address').eq('is_open', true).order('store_name', { ascending: true }).range(start, start + PAGE_SIZE - 1);
+  const { count: totalCount } = await supabase.from('vendors').select('*', { count: 'exact', head: true }).eq('is_open', true).eq('accepting_orders', true);
+  const { data: stores, error } = await supabase.from('vendors').select('id, store_name, address').eq('is_open', true).eq('accepting_orders', true).order('store_name', { ascending: true }).range(start, start + PAGE_SIZE - 1);
 
   if (error) { console.error(error.message); await sendText(to, 'Sorry, something went wrong.'); return; }
   if (!stores || stores.length === 0) { await sendText(to, 'No restaurants are currently open.'); return; }
@@ -783,6 +783,11 @@ async function sendVendorList(to, page = 0, note = '') {
 }
 
 async function sendMenuList(to, vendorId, page = 0, note = '', category = null) {
+  const { data: orderStatus, error: orderStatusError } = await supabase.from('vendors').select('accepting_orders').eq('id', vendorId).maybeSingle();
+  if (orderStatusError || !orderStatus || orderStatus.accepting_orders === false) {
+    await sendText(to, 'This restaurant has paused new orders. Please choose another restaurant or try again later.');
+    return;
+  }
   const session = getSession(to);
   let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString());
   if (category && category !== 'all') query = query.eq('category', category);
@@ -828,6 +833,11 @@ async function sendMenuList(to, vendorId, page = 0, note = '', category = null) 
 }
 
 async function sendMenuFlow(to, vendorId, page = 0, note = '', category = null) {
+  const { data: orderStatus, error: orderStatusError } = await supabase.from('vendors').select('accepting_orders').eq('id', vendorId).maybeSingle();
+  if (orderStatusError || !orderStatus || orderStatus.accepting_orders === false) {
+    await sendText(to, 'This restaurant has paused new orders. Please choose another restaurant or try again later.');
+    return;
+  }
   const session = getSession(to);
   let query = supabase.from('menu_items').select('id, name, price').eq('vendor_id', vendorId).eq('in_stock', true).or('stock_pause_until.is.null,stock_pause_until.lte.' + new Date().toISOString());
   if (category && category !== 'all') query = query.eq('category', category);
@@ -1322,9 +1332,9 @@ app.post('/webhook', async (req, res) => {
           await sendCartView(from, session);
           return;
         }
-        const { data: vendor } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
-        if (!vendor || !vendor.is_open) {
-          await sendText(from, 'The restaurant is no longer open. Send *menu* to choose another restaurant.');
+        const { data: vendor } = await supabase.from('vendors').select('id, is_open, accepting_orders').eq('id', session.vendorId).maybeSingle();
+        if (!vendor || !vendor.is_open || vendor.accepting_orders === false) {
+          await sendText(from, 'This restaurant is closed or has paused new orders. Send *menu* to choose another restaurant.');
           resetSession(session);
           return;
         }
