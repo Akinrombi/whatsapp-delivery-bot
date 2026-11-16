@@ -1332,9 +1332,9 @@ app.post('/webhook', async (req, res) => {
           await sendCartView(from, session);
           return;
         }
-        const { data: vendor } = await supabase.from('vendors').select('id, is_open').eq('id', session.vendorId).maybeSingle();
-        if (!vendor || !vendor.is_open) {
-          await sendText(from, 'The restaurant is no longer open. Send *menu* to choose another restaurant.');
+        const { data: vendor } = await supabase.from('vendors').select('id, is_open, accepting_orders').eq('id', session.vendorId).maybeSingle();
+        if (!vendor || !vendor.is_open || vendor.accepting_orders === false) {
+          await sendText(from, 'This restaurant is closed or has paused new orders. Send *menu* to choose another restaurant.');
           resetSession(session);
           return;
         }
