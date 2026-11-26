@@ -1731,6 +1731,8 @@ function statusMessage(o) {
     case 'new': return `🧾 *${o.order_number}:* We received your order and sent it to the vendor.`;
     case 'vendor_accepted': return `✅ *${o.order_number}:* The vendor accepted your order and is preparing it.`;
     case 'ready_for_pickup': return `📦 *${o.order_number}:* Your order is ready. We are sending it to an available rider.`;
+    case 'arrived_at_vendor':
+    case 'arrived_pickup': return `📍 *${o.order_number}:* Your rider has arrived at the vendor for pickup.`;
     case 'preparing': return `🍳 *${o.order_number}:* Restaurant is preparing your meal!`;
     case 'ready_for_rider': return `📦 *${o.order_number}:* Food is ready! Finding a rider.`;
     case 'on_the_way': return `🚴 *${o.order_number}:* Your rider is on the way to you.`;
