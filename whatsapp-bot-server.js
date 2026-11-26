@@ -262,6 +262,10 @@ app.get('/webhook', (req, res) => {
 });
 
 async function sendWhatsAppMessage(to, payload) {
+  if (process.env.WHATSAPP_DRY_RUN === 'true') {
+    console.log('[WhatsApp dry-run]', to, JSON.stringify(payload));
+    return true;
+  }
   try {
     await axios.post(
       `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`,
@@ -1724,6 +1728,9 @@ app.post('/webhook', async (req, res) => {
 function statusMessage(o) {
   const name = o.riders?.profiles?.name; const rphone = o.riders?.profiles?.phone;
   switch (o.status) {
+    case 'new': return `🧾 *${o.order_number}:* We received your order and sent it to the vendor.`;
+    case 'vendor_accepted': return `✅ *${o.order_number}:* The vendor accepted your order and is preparing it.`;
+    case 'ready_for_pickup': return `📦 *${o.order_number}:* Your order is ready. We are sending it to an available rider.`;
     case 'preparing': return `🍳 *${o.order_number}:* Restaurant is preparing your meal!`;
     case 'ready_for_rider': return `📦 *${o.order_number}:* Food is ready! Finding a rider.`;
     case 'accepted': return `🛵 *${o.order_number}:* ${name ? name : 'A rider'} accepted your order${rphone ? ` (${rphone})` : ''}.`;
@@ -1741,7 +1748,7 @@ async function notifyCustomers() {
   try {
     const { data: orders, error } = await supabase.from('orders')
       .select('id, order_number, status, customer_phone, delivery_code, cancel_reason, riders(profiles(name, phone))')
-      .eq('source', 'whatsapp').eq('wa_pending', true).limit(20);
+      .eq('wa_pending', true).limit(20);
     if (error) return;
     for (const o of orders || []) {
       const msg = statusMessage(o);
