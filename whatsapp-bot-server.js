@@ -1733,6 +1733,7 @@ function statusMessage(o) {
     case 'ready_for_pickup': return `📦 *${o.order_number}:* Your order is ready. We are sending it to an available rider.`;
     case 'preparing': return `🍳 *${o.order_number}:* Restaurant is preparing your meal!`;
     case 'ready_for_rider': return `📦 *${o.order_number}:* Food is ready! Finding a rider.`;
+    case 'on_the_way': return `🚴 *${o.order_number}:* Your rider is on the way to you.`;
     case 'accepted': return `🛵 *${o.order_number}:* ${name ? name : 'A rider'} accepted your order${rphone ? ` (${rphone})` : ''}.`;
     case 'picked_up': return `🚀 *${o.order_number}:* Food picked up!\n\n🔑 PIN: *${o.delivery_code}*`;
     case 'arrived_at_customer': return `📍 *${o.order_number}:* Rider arrived! Give PIN: *${o.delivery_code}*`;
