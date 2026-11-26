@@ -1755,6 +1755,10 @@ async function notifyCustomers() {
     if (error) return;
     for (const o of orders || []) {
       const msg = statusMessage(o);
+      if (process.env.WHATSAPP_DRY_RUN === 'true') {
+        if (msg && o.customer_phone) console.log('[WhatsApp dry-run notification]', o.id, o.status, o.customer_phone, msg);
+        continue; // Do not send messages or clear database notification flags in test mode.
+      }
       if (msg && o.customer_phone) {
         const sent = await sendText(o.customer_phone, msg);
         // Keep the notification pending when Meta rejects the send so the next
