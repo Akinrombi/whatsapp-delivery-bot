@@ -262,6 +262,10 @@ app.get('/webhook', (req, res) => {
 });
 
 async function sendWhatsAppMessage(to, payload) {
+  if (process.env.WHATSAPP_DRY_RUN === 'true') {
+    console.log('[WhatsApp dry-run]', to, JSON.stringify(payload));
+    return true;
+  }
   try {
     await axios.post(
       `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`,
@@ -1724,8 +1728,14 @@ app.post('/webhook', async (req, res) => {
 function statusMessage(o) {
   const name = o.riders?.profiles?.name; const rphone = o.riders?.profiles?.phone;
   switch (o.status) {
+    case 'new': return `🧾 *${o.order_number}:* We received your order and sent it to the vendor.`;
+    case 'vendor_accepted': return `✅ *${o.order_number}:* The vendor accepted your order and is preparing it.`;
+    case 'ready_for_pickup': return `📦 *${o.order_number}:* Your order is ready. We are sending it to an available rider.`;
+    case 'arrived_at_vendor':
+    case 'arrived_pickup': return `📍 *${o.order_number}:* Your rider has arrived at the vendor for pickup.`;
     case 'preparing': return `🍳 *${o.order_number}:* Restaurant is preparing your meal!`;
     case 'ready_for_rider': return `📦 *${o.order_number}:* Food is ready! Finding a rider.`;
+    case 'on_the_way': return `🚴 *${o.order_number}:* Your rider is on the way to you.`;
     case 'accepted': return `🛵 *${o.order_number}:* ${name ? name : 'A rider'} accepted your order${rphone ? ` (${rphone})` : ''}.`;
     case 'picked_up': return `🚀 *${o.order_number}:* Food picked up!\n\n🔑 PIN: *${o.delivery_code}*`;
     case 'arrived_at_customer': return `📍 *${o.order_number}:* Rider arrived! Give PIN: *${o.delivery_code}*`;
@@ -1741,10 +1751,14 @@ async function notifyCustomers() {
   try {
     const { data: orders, error } = await supabase.from('orders')
       .select('id, order_number, status, customer_phone, delivery_code, cancel_reason, riders(profiles(name, phone))')
-      .eq('source', 'whatsapp').eq('wa_pending', true).limit(20);
+      .eq('wa_pending', true).limit(20);
     if (error) return;
     for (const o of orders || []) {
       const msg = statusMessage(o);
+      if (process.env.WHATSAPP_DRY_RUN === 'true') {
+        if (msg && o.customer_phone) console.log('[WhatsApp dry-run notification]', o.id, o.status, o.customer_phone, msg);
+        continue; // Do not send messages or clear database notification flags in test mode.
+      }
       if (msg && o.customer_phone) {
         const sent = await sendText(o.customer_phone, msg);
         // Keep the notification pending when Meta rejects the send so the next
